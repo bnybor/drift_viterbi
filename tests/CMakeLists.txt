@@ -1,0 +1,4 @@
+add_executable(test_drift_viterbi test_drift_viterbi.c)
+target_link_libraries(test_drift_viterbi PRIVATE drift_viterbi::drift_viterbi)
+
+add_test(NAME test_drift_viterbi COMMAND test_drift_viterbi)

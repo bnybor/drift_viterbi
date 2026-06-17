@@ -1,0 +1,11 @@
+/build/
+/cmake-build-*/
+
+# Eclipse
+.project
+.cproject
+.settings/
+.metadata/
+.autotools
+*.launch
+.cache
