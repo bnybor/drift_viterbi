@@ -192,6 +192,13 @@ int dv_code_encode_flush(const dv_code *code, int *state, uint8_t *out) {
  * paths have merged. Output emerges at fixed latency L with bounded memory and
  * no frame boundaries.
  *
+ * Each step emits one input bit's group of n coded bits, scored by a per-edge
+ * bit-level alignment (see align_fill) that may insert or delete individual
+ * received bits anywhere within the group. A node's drift is its running
+ * net (insertions - deletions); a branch that consumes n + Delta received bits
+ * moves drift by Delta, so indels at arbitrary bit positions - not just group
+ * boundaries - are tracked exactly.
+ *
  * Re-anchoring keeps the drift window centred on the committed timing: each
  * step the window may be shifted by sigma in {-1,0,+1} (folded into the read
  * cursor), so the net cumulative drift can grow without bound while each node's
@@ -217,6 +224,7 @@ struct dv_stream_decoder {
   double *nmetric; /* [S*W], scratch                               */
   dv_bp *bp;       /* [L*S*W], backpointer ring (layer = step % L) */
   int *shift;      /* [L], re-anchor sigma applied at each step    */
+  double *align;   /* [(n+1)*(n+2D+1)], per-edge alignment-DP scratch */
 
   long long steps;   /* trellis steps processed                      */
   long long decided; /* decisions emitted (next step index to emit)  */
@@ -299,19 +307,49 @@ static int pick_shift(const struct dv_stream_decoder *sd) {
   return 0;
 }
 
-/* Cost of reading the received group `window` (n bits) as the expected output
- * `expected`: an erased bit costs a fixed amount, others cost match or miss. */
-static double branch_cost(const struct dv_stream_decoder *sd,
-                          const uint8_t *expected, const uint8_t *window) {
-  double cost = 0.0;
-  for (int j = 0; j < sd->n; ++j) {
-    if (window[j] == DV_ERASURE) {
-      cost += sd->c_erase;
-    } else {
-      cost += (expected[j] == window[j]) ? sd->c_match : sd->c_miss;
+/* Fill the alignment DP for one edge: align the `n` expected output bits against
+ * the received bits starting at buffer index `base`, allowing per-bit insertion,
+ * deletion, and substitution. f[j][p] (stored row-major at j*(P+1)+p) is the
+ * min cost to align the first j expected bits while consuming p received bits;
+ * P = n + 2D is the most bits any branch can consume. Reads outside the buffered
+ * region (idx < 0 or idx >= rlen) are infeasible, so only the deletion move is
+ * available there - this is what keeps the ends of the stream safe.
+ *
+ * The branch cost into a node at ending drift di' is then f[n][n + (di' - di)]:
+ * consuming n + Delta received bits to emit the group shifts drift by Delta. A
+ * matched/substituted bit also pays c_keep (the per-bit "not an indel" cost), so
+ * the model is fully bit-level rather than per-group. */
+static void align_fill(const struct dv_stream_decoder *sd,
+                       const uint8_t *expected, int base) {
+  const int n = sd->n, P = sd->n + 2 * sd->D, stride = P + 1;
+  double *f = sd->align;
+
+  f[0] = 0.0;
+  for (int p = 1; p <= P; ++p) {
+    const int idx = base + p - 1;
+    f[p] = (idx >= 0 && idx < sd->rlen) ? f[p - 1] + sd->c_ins : INFINITY;
+  }
+  for (int j = 1; j <= n; ++j) {
+    double *fj = f + (size_t)j * stride;
+    const double *fj1 = f + (size_t)(j - 1) * stride;
+    fj[0] = fj1[0] + sd->c_del; /* delete expected[j-1], consume nothing */
+    for (int p = 1; p <= P; ++p) {
+      double best = fj1[p] + sd->c_del; /* deletion is always available */
+      const int idx = base + p - 1;
+      if (idx >= 0 && idx < sd->rlen) {
+        const uint8_t r = sd->rbuf[idx];
+        const double mc =
+            sd->c_keep + (r == DV_ERASURE      ? sd->c_erase
+                          : r == expected[j - 1] ? sd->c_match
+                                                 : sd->c_miss);
+        const double align = fj1[p - 1] + mc; /* match / substitute */
+        const double ins = fj[p - 1] + sd->c_ins; /* extra received bit */
+        if (align < best) best = align;
+        if (ins < best) best = ins;
+      }
+      fj[p] = best;
     }
   }
-  return cost;
 }
 
 /* Subtract the lowest node cost from every node, so the best one sits at 0.
@@ -357,8 +395,7 @@ static void stream_step(struct dv_stream_decoder *sd) {
   const dv_code *code = sd->code;
   const int n = sd->n, D = sd->D, S = sd->S, W = sd->W;
   const size_t count = (size_t)S * W;
-  const int delta[3] = {0, +1, -1}; /* keep / insert / delete */
-  const double delta_cost[3] = {sd->c_keep, sd->c_ins, sd->c_del};
+  const int P = sd->n + 2 * sd->D; /* most received bits a branch can consume */
 
   const int sigma = pick_shift(sd);
   if (sigma != 0) {
@@ -371,32 +408,35 @@ static void stream_step(struct dv_stream_decoder *sd) {
   }
   dv_bp *bp = sd->bp + (size_t)(sd->steps % sd->L) * count;
 
-  /* For every live node, try both input bits and all three drift moves. */
+  /* For every live node, try both input bits; the bit-level alignment DP then
+   * spreads cost to every reachable ending drift in one pass. */
   for (int s = 0; s < S; ++s) {
     for (int di = 0; di < W; ++di) {
       const double cur = sd->metric[node_at(s, di, W)];
       if (cur == INFINITY) {
         continue;
       }
-      const int drift = di - D;
-      const int read = sd->rpos + drift;
-      if (read < 0 || read + n > sd->rlen) {
-        continue; /* group not buffered yet */
-      }
-      const uint8_t *window = sd->rbuf + read;
+      const int base = sd->rpos + (di - D);
 
       for (int b = 0; b <= 1; ++b) {
         const int next_s = code->next_state[s * 2 + b];
         const uint8_t *expected = &code->output[((size_t)(s * 2 + b)) * n];
-        const double group_cost = branch_cost(sd, expected, window);
+        align_fill(sd, expected, base);
+        const double *fn = sd->align + (size_t)n * (P + 1);
 
-        for (int k = 0; k < 3; ++k) {
-          const int next_drift = drift + delta[k];
-          if (next_drift < -D || next_drift > D) {
+        /* Ending drift di' consumes n + (di' - di) received bits; fn holds that
+         * consumption's alignment cost. */
+        for (int ndi = 0; ndi < W; ++ndi) {
+          const int p = n + (ndi - di);
+          if (p < 0 || p > P) {
             continue;
           }
-          const double cost = cur + group_cost + delta_cost[k];
-          const size_t to = node_at(next_s, next_drift + D, W);
+          const double bc = fn[p];
+          if (bc == INFINITY) {
+            continue;
+          }
+          const double cost = cur + bc;
+          const size_t to = node_at(next_s, ndi, W);
           if (cost < sd->nmetric[to]) {
             sd->nmetric[to] = cost;
             bp[to].prev_s = s;
@@ -539,9 +579,12 @@ dv_stream_decoder *dv_stream_decoder_create(const dv_code *code,
   sd->nmetric = malloc(count * sizeof(double));
   sd->bp = malloc((size_t)sd->L * count * sizeof(dv_bp));
   sd->shift = malloc((size_t)sd->L * sizeof(int));
+  sd->align =
+      malloc((size_t)(sd->n + 1) * (sd->n + 2 * sd->D + 1) * sizeof(double));
   sd->rcap = (sd->L + 2) * sd->n + 8 * sd->D + 64;
   sd->rbuf = malloc((size_t)sd->rcap);
-  if (!sd->metric || !sd->nmetric || !sd->bp || !sd->shift || !sd->rbuf) {
+  if (!sd->metric || !sd->nmetric || !sd->bp || !sd->shift || !sd->align ||
+      !sd->rbuf) {
     dv_stream_decoder_destroy(sd);
     return NULL;
   }
@@ -558,6 +601,7 @@ void dv_stream_decoder_destroy(dv_stream_decoder *sd) {
   free(sd->nmetric);
   free(sd->bp);
   free(sd->shift);
+  free(sd->align);
   free(sd->rbuf);
   free(sd);
 }

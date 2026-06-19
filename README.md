@@ -62,7 +62,7 @@ Set these in `dv_stream_params`; anything you leave out defaults to 0.
 | `decision_depth` | Output delay in bits. Larger = more reliable, more latency. Try ~6× the code's K. Required. |
 | `p_sub`          | How often a received bit is flipped (e.g. 0.01 = 1%). Required. |
 | `max_drift`      | How far alignment may slip from inserted/dropped bits. 0 (default) corrects flips only; 4–8 also handles insertions and deletions. |
-| `p_ins`, `p_del` | How often a bit is inserted / dropped. Needed when `max_drift > 0`. |
+| `p_ins`, `p_del` | How often a coded bit is inserted / dropped (per bit, at any position). Needed when `max_drift > 0`. |
 | `p_erase`        | How often a received bit is marked `DV_ERASURE` (lost). |
 
 You don't need exact probabilities — rough, order-of-magnitude values are fine;

@@ -179,8 +179,9 @@ typedef struct dv_stream_decoder dv_stream_decoder;
  *   max_drift      : how far alignment may slip from inserted/dropped bits before
  *                    the decoder loses track. 0 (the default) corrects flipped
  *                    bits only; 4-8 also recovers from insertions and deletions.
- *   p_ins, p_del   : how often a bit is inserted / dropped (p_ins + p_del < 1).
- *                    Required when max_drift > 0; leave 0 otherwise.
+ *   p_ins, p_del   : how often a coded bit is inserted / dropped, per bit and at
+ *                    any position (p_ins + p_del < 1). Required when
+ *                    max_drift > 0; leave 0 otherwise.
  *   p_erase        : how often a received bit is DV_ERASURE. 0 (the default) if
  *                    you never mark erasures.
  *

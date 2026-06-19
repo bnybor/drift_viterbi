@@ -73,7 +73,7 @@ gaps widen: `K5_R1_5` stays under 0.005 while `K7_R1_2` reaches ~0.14.
 
 ![mean info bits between edits vs flip rate](plots/runlen_vs_flip_per_info_bit.png)
 
-Mean run length between edits, in info bits (linear, adaptive y-cap ~1140). Each
+Mean run length between edits, in info bits (linear, adaptive y-cap ~1500). Each
 code's run length is effectively unbounded (off the top) below its threshold,
 then drops off a cliff: `K3_R1_2` near 2.5%, `K7_R1_2` near 5%, `K7_R1_3` near
 10%, `K5_R1_5` near 15%. This reads directly as "how long a clean run you can
@@ -81,62 +81,59 @@ expect" at a given flip rate.
 
 ![mean coded bits between edits vs flip rate](plots/runlen_vs_flip_per_coded_bit.png)
 
-The same in coded bits (`n`× larger, cap ~3100); identical cliff positions. Use
+The same in coded bits (`n`× larger, cap ~4750); identical cliff positions. Use
 this view when you care about bits on the wire rather than payload delivered.
 
 ### Insert channel (spurious bits)
 
 ![edit distance per info bit vs insert rate](plots/edit_vs_insert_per_info_bit.png)
 
-Edit distance per info bit. Insertions are the harshest impairment and the
-curves are jagged — once the decoder mis-tracks an insertion the cost is large
-and high-variance. The rate-1/2 codes spike earliest (`K3_R1_2` jumps to ~0.23
-by 7%); all four converge toward 0.2–0.27 by 20%, so redundancy buys little in
-info-bit terms here.
+Edit distance per info bit. With the bit-level-alignment decoder the codes now
+separate cleanly by redundancy: `K5_R1_5` stays under ~0.04 even at 20%
+insertions and `K7_R1_3` under ~0.07, while the rate-1/2 codes hold low until
+~7% then jump to ~0.18–0.25 (jagged — the regime where they lose lock is
+high-variance). Extra parity clearly buys indel tolerance now.
 
 ![edit distance per coded bit vs insert rate](plots/edit_vs_insert_per_coded_bit.png)
 
-Per coded bit the codes separate clearly: `K5_R1_5` stays smooth and low (~0.05
-at 20%), `K7_R1_3` next, and the rate-1/2 codes are highest and noisiest — so
-extra redundancy does help per coded bit, even against insertions.
+Per coded bit the separation is starker: `K5_R1_5` stays below ~0.01 across the
+whole range, `K7_R1_3` ~0.02, and the rate-1/2 codes reach ~0.08–0.12.
 
 ![mean info bits between edits vs insert rate](plots/runlen_vs_insert_per_info_bit.png)
 
-Run length in info bits (cap ~95) collapses almost immediately: every code falls
-below ~95 info bits per edit by ~3% insert rate and settles at ~5–10 by 7%. The
-codes are nearly indistinguishable in this unit.
+Run length in info bits (cap ~260). `K5_R1_5` sustains ~100–250 info bits per
+edit across most of the range (spiky, since edits are rare), `K7_R1_3` ~20–50,
+while the rate-1/2 codes collapse below ~10 once they lose lock past ~7%.
 
 ![mean coded bits between edits vs insert rate](plots/runlen_vs_insert_per_coded_bit.png)
 
-In coded bits (cap ~225) the redundancy ordering reappears in the tail:
-`K5_R1_5` sustains ~20–50 coded bits per edit out to 20%, `K7_R1_3` ~15–35, and
-the rate-1/2 codes ~8–10.
+The same in coded bits (cap ~820): `K5_R1_5` clears many hundreds of coded bits
+per edit, while the rate-1/2 codes manage only a handful past their knee.
 
 ### Delete channel (dropped bits)
 
 ![edit distance per info bit vs delete rate](plots/edit_vs_delete_per_info_bit.png)
 
-Edit distance per info bit. The rate-1/2 codes (overlapping) climb fastest and
-plateau near 0.30 by ~12%; `K7_R1_3` and `K5_R1_5` rise more gradually
-(`K5_R1_5` lowest, ~0.25 at 20%, with some mid-range noise). The knee is earlier
-than for flips — a dropped coded bit also stresses re-anchoring.
+Edit distance per info bit. Deletions now separate by redundancy too: `K5_R1_5`
+only reaches ~0.06 at 20% deletions and `K7_R1_3` stays well below the rate-1/2
+codes, which climb to ~0.25–0.29. The curves are non-monotonic in the failure
+regime (e.g. dips near 10–15%) where partial re-sync comes and goes. The knee is
+earlier than for flips — a dropped coded bit also shifts timing.
 
 ![edit distance per coded bit vs delete rate](plots/edit_vs_delete_per_coded_bit.png)
 
-Per coded bit, a clean redundancy ranking: the rate-1/2 codes plateau ~0.15,
-`K7_R1_3` ~0.09, `K5_R1_5` ~0.05 at 20%.
+Per coded bit, a clean redundancy ranking: `K5_R1_5` ~0.012, `K7_R1_3` ~0.055,
+and the rate-1/2 codes ~0.13–0.15 at 20%.
 
 ![mean info bits between edits vs delete rate](plots/runlen_vs_delete_per_info_bit.png)
 
-Run length in info bits (cap ~75) drops steeply near the origin to ~3–5 bits per
-edit in the tail. A few noise spikes survive 30 trials (e.g. `K5_R1_5` near 6%),
-inherent to the high-variance failure regime.
+Run length in info bits (cap ~1120). `K5_R1_5` holds an effectively unbounded run
+out to ~3% deletions and stays the highest throughout; the rate-1/2 codes cliff
+earliest. Tails settle at tens of info bits per edit.
 
 ![mean coded bits between edits vs delete rate](plots/runlen_vs_delete_per_coded_bit.png)
 
-In coded bits (cap ~200) the stronger codes hold longer runs in the tail
-(`K5_R1_5` ~20–37, `K7_R1_3` ~12, rate-1/2 ~6–8 coded bits per edit), with the
-same occasional spikes.
+The same in coded bits (cap ~2940), scaled by rate; same ordering.
 
 ### Erase channel (bits marked lost)
 

@@ -235,7 +235,68 @@ static void test_stream_reanchor(void) {
       ndel, ndel, got, n_info, errors);
 
   assert(got >= n_info - 2 && got <= n_info + 2);
-  assert(errors < n_info / 5);
+  assert(errors == 0); /* bit-level alignment recovers these deletions exactly */
+
+  dv_stream_decoder_destroy(sd);
+  free(outbuf);
+  free(rx);
+  free(coded);
+  free(msg);
+  dv_code_destroy(code);
+}
+
+/* Indels placed in the MIDDLE of coded groups, not at group boundaries. The
+ * bit-level alignment tracks an indel at any bit position, so an otherwise
+ * clean stream is recovered essentially perfectly - the group holding the indel
+ * is no longer smeared into a burst of substitution errors. */
+static void test_stream_midgroup_indel(void) {
+  dv_code *code = dv_code_create(K, GENERATORS, N_GEN); /* group size N_GEN=5 */
+  assert(code != NULL);
+
+  const int n_info = 400;
+  uint8_t *msg = malloc((size_t)n_info);
+  for (int i = 0; i < n_info; ++i) msg[i] = (uint8_t)((i * 11 + 5) & 1);
+
+  int clen = n_info * N_GEN;
+  uint8_t *coded = malloc((size_t)clen);
+  int st = 0;
+  assert(dv_code_encode(code, msg, n_info, &st, coded) == clen);
+
+  /* Drop a bit at phase 2 and insert one at phase 62 of every 120 coded bits.
+   * 120 is a multiple of N_GEN, so both land at offset 2 within a group - mid
+   * group, never on a boundary. */
+  uint8_t *rx = malloc((size_t)clen + 64);
+  int rl = 0, ndel = 0, nins = 0;
+  for (int i = 0; i < clen; ++i) {
+    const int phase = i % 120;
+    if (phase == 2) { /* mid-group deletion */
+      ndel++;
+      continue;
+    }
+    if (phase == 62) { /* mid-group insertion of a spurious bit */
+      rx[rl++] = (uint8_t)((i >> 1) & 1);
+      nins++;
+    }
+    rx[rl++] = coded[i];
+  }
+
+  dv_stream_decoder *sd = make_decoder(code, 48, 6, 0.01, 0.01, 0.01, 0.0);
+  assert(sd != NULL);
+
+  int cap = n_info + 32;
+  uint8_t *outbuf = malloc((size_t)cap);
+  int got = stream_decode_all(sd, rx, rl, outbuf, cap);
+
+  int cmp = got < n_info ? got : n_info;
+  int errors = 0;
+  for (int i = 0; i < cmp; ++i) errors += (outbuf[i] != msg[i]);
+  printf(
+      "stream mid-group indel: %d deletions + %d insertions mid-group, "
+      "decoded %d/%d bits, errors=%d\n",
+      ndel, nins, got, n_info, errors);
+
+  assert(got >= n_info - 2 && got <= n_info + 2);
+  assert(errors == 0);
 
   dv_stream_decoder_destroy(sd);
   free(outbuf);
@@ -441,6 +502,7 @@ int main(void) {
   test_stream_clean();
   test_stream_erasures();
   test_stream_reanchor();
+  test_stream_midgroup_indel();
   test_standard_code();
   test_blind_acquisition();
   test_stream_flips_only();
