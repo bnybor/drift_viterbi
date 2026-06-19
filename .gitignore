@@ -1,6 +1,9 @@
 /build/
 /cmake-build-*/
 
+# Python venv for the metrics plotting script
+/.venv/
+
 # Eclipse
 .project
 .cproject

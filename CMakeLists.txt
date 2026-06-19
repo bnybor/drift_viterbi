@@ -8,6 +8,7 @@ project(drift_viterbi
 # ---- Options ----------------------------------------------------------------
 
 option(DRIFT_VITERBI_BUILD_TESTS "Build the drift_viterbi tests" ${PROJECT_IS_TOP_LEVEL})
+option(DRIFT_VITERBI_BUILD_BENCH "Build the drift_viterbi metrics harness" OFF)
 
 # ---- Library ----------------------------------------------------------------
 
@@ -60,4 +61,10 @@ install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 if(DRIFT_VITERBI_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
+endif()
+
+# ---- Benchmarks -------------------------------------------------------------
+
+if(DRIFT_VITERBI_BUILD_BENCH)
+    add_subdirectory(bench)
 endif()

@@ -92,6 +92,11 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
+## Metrics
+
+A Monte-Carlo harness measures decoding-mistake rates against flip / insert /
+drop channels for each standard code — see [METRICS.md](METRICS.md).
+
 ## Install
 
 ```sh
