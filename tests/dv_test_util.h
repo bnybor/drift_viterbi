@@ -211,6 +211,18 @@ static inline void erase_channel(uint8_t *buf, size_t len, double p_erase,
   }
 }
 
+/* Prepend `plen` random bits before `body` (blen bits) into out[], modelling a
+ * capture that begins on garbage / a partial codeword before the coded stream
+ * starts. Returns the combined length. out[] must hold plen + blen bits. */
+static inline size_t prepend_prefix(size_t plen, const uint8_t *body,
+                                    size_t blen, uint64_t *rng, uint8_t *out) {
+  for (size_t i = 0; i < plen; ++i) {
+    out[i] = (uint8_t)(rng_next(rng) & 1u);
+  }
+  memcpy(out + plen, body, blen);
+  return plen + blen;
+}
+
 /* -- decoder helpers ------------------------------------------------------- */
 
 /* Build a decoder from positional settings (keeps tests concise). */

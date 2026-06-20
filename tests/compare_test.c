@@ -307,6 +307,57 @@ static void test_len_helpers(uint64_t seed) {
   free(msg);
 }
 
+/* 8. Blind acquisition: a same-code verdict must survive a capture that does not
+ * begin at a clean point - spliced mid-stream, behind a garbage / partial-
+ * codeword prefix, or at an arbitrary bit phase - mirroring the decoder. A
+ * garbage-prefixed random or different-code stream must still read as different.
+ */
+static void test_blind_acquisition_compare(uint64_t seed) {
+  printf("test_blind_acquisition_compare\n");
+  uint8_t *msg = malloc(INFO_BITS);
+  uint8_t *a = malloc(CODED_CAP);
+  uint8_t *b = malloc(CODED_CAP);
+  uint8_t *d = malloc(CODED_CAP);
+  uint8_t *buf = malloc(CODED_CAP + 4096);
+  uint64_t rng = seed + 600;
+  int n, k, n2, k2;
+  rand_bits(msg, INFO_BITS, &rng);
+  size_t la = encode(DV_CODE_K7_RATE_1_2, msg, INFO_BITS, a, &n, &k);
+  rand_bits(msg, INFO_BITS, &rng);
+  size_t lb = encode(DV_CODE_K7_RATE_1_2, msg, INFO_BITS, b, &n, &k);
+  rand_bits(msg, INFO_BITS, &rng);
+  size_t ld = encode(DV_CODE_K7_RATE_1_2_ALT1, msg, INFO_BITS, d, &n2, &k2);
+
+  /* Spliced mid-stream: rhs tapped partway through, past the phase search and
+   * not a multiple of n. */
+  const size_t splice = 137;
+  check_ge("splice-same-code",
+           dv_compare(n, k, a, la, b + splice, lb - splice), 0.7);
+
+  /* Leading garbage / partial-codeword prefixes of growing length on lhs. */
+  const size_t prefixes[] = {1, 3, 5, 17, 64, 256, 1024};
+  for (size_t i = 0; i < sizeof prefixes / sizeof *prefixes; ++i) {
+    size_t lp = prepend_prefix(prefixes[i], a, la, &rng, buf);
+    char label[48];
+    snprintf(label, sizeof label, "garbage-prefix-%zu", prefixes[i]);
+    check_ge(label, dv_compare(n, k, buf, lp, b, lb), 0.7);
+  }
+
+  /* Garbage-prefixed random vs clean, and garbage-prefixed different code:
+   * still different. */
+  rand_bits(buf, (int)(256 + la), &rng); /* whole lhs random (prefix + body) */
+  check_le("garbage-prefix-random", dv_compare(n, k, buf, 256 + la, b, lb), 0.3);
+
+  size_t ldp = prepend_prefix(256, d, ld, &rng, buf);
+  check_le("garbage-prefix-diff", dv_compare(n, k, buf, ldp, b, lb), 0.3);
+
+  free(msg);
+  free(a);
+  free(b);
+  free(d);
+  free(buf);
+}
+
 int main(void) {
   const uint64_t seed = 0xD1F7C0DEULL;
   test_clean_and_constant_offset(seed);
@@ -316,5 +367,6 @@ int main(void) {
   test_lock_matches_compare(seed);
   test_short_stream(seed);
   test_len_helpers(seed);
+  test_blind_acquisition_compare(seed);
   return test_summary("compare");
 }

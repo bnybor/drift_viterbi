@@ -85,7 +85,48 @@ static void test_detect(uint64_t seed) {
   free(chan);
 }
 
+/* Blind acquisition: detection must survive a capture that does not begin at a
+ * clean point - spliced mid-stream, behind a garbage / partial-codeword prefix,
+ * or at an arbitrary bit phase - mirroring the decoder's blind acquisition. A
+ * garbage prefix on otherwise-random data must still read as no code. */
+static void test_blind_acquisition_detect(uint64_t seed) {
+  printf("test_blind_acquisition_detect\n");
+  const int info_bits = 1500;
+  uint8_t *msg = malloc((size_t)info_bits);
+  uint8_t *coded = malloc(CODED_CAP);
+  uint8_t *buf = malloc(CODED_CAP + 4096);
+
+  uint64_t rng = seed + 900;
+  int n, k;
+  rand_bits(msg, info_bits, &rng);
+  size_t clen = encode(DV_CODE_K7_RATE_1_2, msg, info_bits, coded, &n, &k);
+
+  /* Spliced mid-stream: a tap that begins partway through the coded stream, at
+   * an offset well past the framing-phase search and not a multiple of n. */
+  const size_t splice = 137;
+  check_gt("splice", dv_detect(n, k, coded + splice, clen - splice), 0.7);
+
+  /* Leading garbage / partial-codeword prefixes of growing length. */
+  const size_t prefixes[] = {1, 3, 5, 17, 64, 256, 1024};
+  for (size_t i = 0; i < sizeof prefixes / sizeof *prefixes; ++i) {
+    size_t blen = prepend_prefix(prefixes[i], coded, clen, &rng, buf);
+    char label[48];
+    snprintf(label, sizeof label, "garbage-prefix-%zu", prefixes[i]);
+    check_gt(label, dv_detect(n, k, buf, blen), 0.7);
+  }
+
+  /* A garbage prefix on otherwise-random data is still not a code. */
+  rand_bits(coded, (int)clen, &rng);
+  size_t rlen = prepend_prefix(256, coded, clen, &rng, buf);
+  check_lt("garbage-prefix-random", dv_detect(n, k, buf, rlen), 0.3);
+
+  free(msg);
+  free(coded);
+  free(buf);
+}
+
 int main(void) {
   test_detect(0xD1F7C0DEULL);
+  test_blind_acquisition_detect(0xD1F7C0DEULL);
   return test_summary("detect");
 }
