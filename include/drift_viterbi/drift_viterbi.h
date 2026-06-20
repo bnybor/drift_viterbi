@@ -57,7 +57,7 @@ extern "C" {
  *       .max_drift      = 4,
  *       .p_sub = 0.01, .p_ins = 0.01, .p_del = 0.01,
  *   });
- *   int n = dv_stream_decode(d, in, n_in, out, out_cap);
+ *   int n = dv_stream_decode(d, in, n_in, out, NULL, out_cap);
  *   while (dv_stream_decode_flush(d, out, out_cap) > 0) { }
  *
  *   dv_stream_decoder_destroy(d);
@@ -97,12 +97,25 @@ const char *drift_viterbi_version(void);
 typedef struct dv_code dv_code;
 
 /* Ready-made codes. More output per input bit corrects more errors but uses
- * more bandwidth. When unsure, pick DV_CODE_K7_RATE_1_2. */
+ * more bandwidth; when unsure, pick DV_CODE_K7_RATE_1_2. Each rate/K comes in
+ * three polynomial sets - the default plus two alternates picked to be as far
+ * apart as possible, so a decoder for one will not lock onto another's stream
+ * (see dv_stream_decode's lock_probability). The alternates trade a little free
+ * distance for that separation. The trailing comment is each code's free
+ * distance: higher corrects more. */
 typedef enum {
-  DV_CODE_K3_RATE_1_2, /* 2x output size, light correction      */
-  DV_CODE_K7_RATE_1_2, /* 2x output size, strong (good default) */
-  DV_CODE_K7_RATE_1_3, /* 3x output size, stronger              */
-  DV_CODE_K5_RATE_1_5  /* 5x output size, strongest             */
+  DV_CODE_K3_RATE_1_2,      /* 2x output size; d_free 5 (good default for K=3) */
+  DV_CODE_K3_RATE_1_2_ALT1, /* 2x output size; d_free 4                        */
+  DV_CODE_K3_RATE_1_2_ALT2, /* 2x output size; d_free 4                        */
+  DV_CODE_K7_RATE_1_2,      /* 2x output size; d_free 10 (good default)        */
+  DV_CODE_K7_RATE_1_2_ALT1, /* 2x output size; d_free 9                        */
+  DV_CODE_K7_RATE_1_2_ALT2, /* 2x output size; d_free 9                        */
+  DV_CODE_K7_RATE_1_3,      /* 3x output size; d_free 15                       */
+  DV_CODE_K7_RATE_1_3_ALT1, /* 3x output size; d_free 15                       */
+  DV_CODE_K7_RATE_1_3_ALT2, /* 3x output size; d_free 15                       */
+  DV_CODE_K5_RATE_1_5,      /* 5x output size; d_free 20 (strongest)           */
+  DV_CODE_K5_RATE_1_5_ALT1, /* 5x output size; d_free 19                       */
+  DV_CODE_K5_RATE_1_5_ALT2  /* 5x output size; d_free 19                       */
 } dv_standard_code;
 
 /* Make one of the ready-made codes above. Returns NULL on a bad argument or out
@@ -216,9 +229,13 @@ void dv_stream_decoder_destroy(dv_stream_decoder *d);
  * You get about one decoded bit per dv_code_n(code) received bits. If `out`
  * fills up (return value == max_out), call again to collect more before feeding
  * more input.
+ *
+ * `lock_probability`, which may be NULL, stores the probability at each bit
+ * position that the decoder is locked onto a valid coded bit stream.  Same size
+ * as `out`.
  */
 int dv_stream_decode(dv_stream_decoder *d, const uint8_t *in, int n_in,
-                     uint8_t *out, int max_out);
+                     uint8_t *out, double *lock_probability, int max_out);
 
 /*
  * Call at the end of the stream to get the last decoded bits still in flight.

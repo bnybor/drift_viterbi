@@ -106,8 +106,9 @@ static int decode_all(dv_stream_decoder *decoder, const uint8_t *received,
   int n_decoded = 0, read_pos = 0;
   while (read_pos < received_len && n_decoded < decoded_cap) {
     int chunk = received_len - read_pos < 64 ? received_len - read_pos : 64;
-    int written = dv_stream_decode(decoder, received + read_pos, chunk,
-                                   decoded + n_decoded, decoded_cap - n_decoded);
+    int written =
+        dv_stream_decode(decoder, received + read_pos, chunk,
+                         decoded + n_decoded, NULL, decoded_cap - n_decoded);
     if (written < 0) {
       return written;
     }

@@ -64,7 +64,7 @@ static int stream_decode_all(dv_stream_decoder *sd, const uint8_t *rx, int rl,
   int got = 0;
   for (int pos = 0; pos < rl;) {
     int chunk = (rl - pos < 41) ? (rl - pos) : 41;
-    int w = dv_stream_decode(sd, rx + pos, chunk, out + got, cap - got);
+    int w = dv_stream_decode(sd, rx + pos, chunk, out + got, NULL, cap - got);
     assert(w >= 0);
     got += w;
     pos += chunk;
@@ -76,6 +76,39 @@ static int stream_decode_all(dv_stream_decoder *sd, const uint8_t *rx, int rl,
     got += w;
   }
   return got;
+}
+
+/* Encode a fixed message with `enc`, decode it with a fresh decoder for `dec`
+ * (both must have the same output rate), and return the mean lock probability
+ * over the locked second half. When enc != dec this measures whether one code's
+ * stream is mistaken for the other's. */
+static double lock_mean_cross(const dv_code *enc, const dv_code *dec) {
+  enum { N_INFO = 600 };
+  uint8_t msg[N_INFO];
+  for (int i = 0; i < N_INFO; ++i) msg[i] = (uint8_t)((i * 7 + 3) & 1);
+
+  int clen = N_INFO * dv_code_n(enc);
+  uint8_t *coded = malloc((size_t)clen);
+  int st = 0;
+  assert(dv_code_encode(enc, msg, N_INFO, &st, coded) == clen);
+
+  dv_stream_decoder *sd = make_decoder(dec, 48, 4, 0.01, 0.01, 0.01, 0.0);
+  assert(sd != NULL);
+  int cap = N_INFO + 64;
+  uint8_t *out = malloc((size_t)cap);
+  double *lock = malloc((size_t)cap * sizeof(double));
+  int got = dv_stream_decode(sd, coded, clen, out, lock, cap);
+  assert(got > 0);
+
+  double sum = 0.0;
+  for (int i = got / 2; i < got; ++i) sum += lock[i];
+  double m = sum / (got - got / 2);
+
+  dv_stream_decoder_destroy(sd);
+  free(lock);
+  free(out);
+  free(coded);
+  return m;
 }
 
 /* The streaming encoder is stateful: encoding in chunks (plus a final flush)
@@ -437,6 +470,191 @@ static void test_stream_flips_only(void) {
   dv_code_destroy(code);
 }
 
+/* Every standard preset (the four defaults plus their two alternates each) must
+ * create, report the right rate/K, and round-trip a clean stream exactly. */
+static void test_all_presets(void) {
+  struct {
+    dv_standard_code code;
+    int n, k;
+  } presets[] = {
+      {DV_CODE_K3_RATE_1_2, 2, 3},      {DV_CODE_K3_RATE_1_2_ALT1, 2, 3},
+      {DV_CODE_K3_RATE_1_2_ALT2, 2, 3}, {DV_CODE_K7_RATE_1_2, 2, 7},
+      {DV_CODE_K7_RATE_1_2_ALT1, 2, 7}, {DV_CODE_K7_RATE_1_2_ALT2, 2, 7},
+      {DV_CODE_K7_RATE_1_3, 3, 7},      {DV_CODE_K7_RATE_1_3_ALT1, 3, 7},
+      {DV_CODE_K7_RATE_1_3_ALT2, 3, 7}, {DV_CODE_K5_RATE_1_5, 5, 5},
+      {DV_CODE_K5_RATE_1_5_ALT1, 5, 5}, {DV_CODE_K5_RATE_1_5_ALT2, 5, 5},
+  };
+  const int np = (int)(sizeof(presets) / sizeof(presets[0]));
+
+  for (int idx = 0; idx < np; ++idx) {
+    dv_code *code = dv_code_create_standard(presets[idx].code);
+    assert(code != NULL);
+    assert(dv_code_n(code) == presets[idx].n);
+    assert(dv_code_k(code) == presets[idx].k);
+
+    const int n_info = 200;
+    uint8_t msg[200];
+    for (int i = 0; i < n_info; ++i) msg[i] = (uint8_t)((i * 5 + 1) & 1);
+    int clen = n_info * presets[idx].n;
+    uint8_t *coded = malloc((size_t)clen);
+    int st = 0;
+    assert(dv_code_encode(code, msg, n_info, &st, coded) == clen);
+
+    dv_stream_decoder *sd =
+        make_decoder(code, 8 * presets[idx].k, 4, 0.01, 0.01, 0.01, 0.0);
+    assert(sd != NULL);
+    int cap = n_info + 32;
+    uint8_t *out = malloc((size_t)cap);
+    int got = stream_decode_all(sd, coded, clen, out, cap);
+    int cmp = got < n_info ? got : n_info, errors = 0;
+    for (int i = 0; i < cmp; ++i) errors += (out[i] != msg[i]);
+    assert(got == n_info && errors == 0);
+
+    dv_stream_decoder_destroy(sd);
+    free(out);
+    free(coded);
+    dv_code_destroy(code);
+  }
+  printf("all presets: %d codes create and round-trip cleanly\n", np);
+}
+
+/* The lock-probability output rises to ~1 on a clean coded stream (the decoder
+ * is synchronized) and stays low on random, non-coded input (it never locks).
+ * A NULL lock pointer is also accepted. */
+static void test_lock_probability(void) {
+  dv_code *code = dv_code_create(K, GENERATORS, N_GEN);
+  assert(code != NULL);
+
+  const int n_info = 600;
+  uint8_t *msg = malloc((size_t)n_info);
+  for (int i = 0; i < n_info; ++i) msg[i] = (uint8_t)((i * 7 + 3) & 1);
+
+  int clen = n_info * N_GEN;
+  uint8_t *coded = malloc((size_t)clen);
+  int st = 0;
+  assert(dv_code_encode(code, msg, n_info, &st, coded) == clen);
+
+  int cap = n_info + 32;
+  uint8_t *out = malloc((size_t)cap);
+  double *lock = malloc((size_t)cap * sizeof(double));
+
+  /* Clean coded stream: feed it all at once, capturing per-bit lock prob. */
+  dv_stream_decoder *sd = make_decoder(code, 48, 4, 0.01, 0.01, 0.01, 0.0);
+  assert(sd != NULL);
+  int got = dv_stream_decode(sd, coded, clen, out, lock, cap);
+  assert(got > 0);
+  double clean_sum = 0.0;
+  for (int i = 0; i < got; ++i) {
+    assert(lock[i] > 0.0 && lock[i] <= 1.0 + 1e-9); /* it is a probability */
+    if (i >= got / 2) clean_sum += lock[i];
+  }
+  double clean_mean = clean_sum / (got - got / 2);
+  dv_stream_decoder_destroy(sd);
+
+  /* Random, non-coded input (a deterministic LCG of bits): the decoder cannot
+   * lock onto a codeword path, so the probability stays low. */
+  uint8_t *rnd = malloc((size_t)clen);
+  uint64_t lcg = 0x1234567u;
+  for (int i = 0; i < clen; ++i) {
+    lcg = lcg * 6364136223846793005ULL + 1u;
+    rnd[i] = (uint8_t)((lcg >> 40) & 1u);
+  }
+  sd = make_decoder(code, 48, 4, 0.01, 0.01, 0.01, 0.0);
+  assert(sd != NULL);
+  int got2 = dv_stream_decode(sd, rnd, clen, out, lock, cap);
+  assert(got2 > 0);
+  double rnd_sum = 0.0;
+  for (int i = got2 / 2; i < got2; ++i) rnd_sum += lock[i];
+  double rnd_mean = rnd_sum / (got2 - got2 / 2);
+  dv_stream_decoder_destroy(sd);
+
+  printf("lock probability: clean mean=%.3f, random mean=%.3f\n", clean_mean,
+         rnd_mean);
+  assert(clean_mean > 0.85);              /* locked on real coded data */
+  assert(rnd_mean < 0.6);                 /* never locks on noise       */
+  assert(clean_mean - rnd_mean > 0.3);    /* clearly discriminates       */
+
+  /* A NULL lock pointer must be accepted and decode normally. */
+  sd = make_decoder(code, 48, 4, 0.01, 0.01, 0.01, 0.0);
+  assert(sd != NULL);
+  assert(dv_stream_decode(sd, coded, clen, out, NULL, cap) > 0);
+  dv_stream_decoder_destroy(sd);
+
+  free(lock);
+  free(out);
+  free(rnd);
+  free(coded);
+  free(msg);
+  dv_code_destroy(code);
+
+  /* The two rate-1/2 presets produce structured (not random) streams of the
+   * same rate, but a stream coded with one must NOT look locked to the other's
+   * decoder - only the matching code locks. */
+  dv_code *k3 = dv_code_create_standard(DV_CODE_K3_RATE_1_2);
+  dv_code *k7 = dv_code_create_standard(DV_CODE_K7_RATE_1_2);
+  assert(k3 != NULL && k7 != NULL);
+
+  double k3_k3 = lock_mean_cross(k3, k3);
+  double k7_k7 = lock_mean_cross(k7, k7);
+  double k3_k7 = lock_mean_cross(k3, k7);
+  double k7_k3 = lock_mean_cross(k7, k3);
+  printf(
+      "lock probability: match k3=%.3f k7=%.3f, cross k3->k7=%.3f k7->k3=%.3f\n",
+      k3_k3, k7_k7, k3_k7, k7_k3);
+
+  assert(k3_k3 > 0.85 && k7_k7 > 0.85);          /* matching code locks       */
+  assert(k3_k7 < 0.75 && k7_k3 < 0.75);          /* the other code does not    */
+  assert(k3_k3 - k3_k7 > 0.3 && k7_k7 - k7_k3 > 0.3);
+
+  dv_code_destroy(k3);
+  dv_code_destroy(k7);
+}
+
+/* Within each (K, rate) family the default and its two alternates are picked to
+ * be mutually distinguishable: each locks onto its own stream but not onto a
+ * sibling's. (Across families - different K or rate - this is NOT guaranteed;
+ * see the comment on dv_standard_code.) */
+static void test_cross_lock_within_family(void) {
+  struct {
+    const char *name;
+    dv_standard_code v[3];
+  } fam[] = {
+      {"K3_R1_2",
+       {DV_CODE_K3_RATE_1_2, DV_CODE_K3_RATE_1_2_ALT1, DV_CODE_K3_RATE_1_2_ALT2}},
+      {"K7_R1_2",
+       {DV_CODE_K7_RATE_1_2, DV_CODE_K7_RATE_1_2_ALT1, DV_CODE_K7_RATE_1_2_ALT2}},
+      {"K7_R1_3",
+       {DV_CODE_K7_RATE_1_3, DV_CODE_K7_RATE_1_3_ALT1, DV_CODE_K7_RATE_1_3_ALT2}},
+      {"K5_R1_5",
+       {DV_CODE_K5_RATE_1_5, DV_CODE_K5_RATE_1_5_ALT1, DV_CODE_K5_RATE_1_5_ALT2}},
+  };
+  const int nf = (int)(sizeof(fam) / sizeof(fam[0]));
+
+  double max_cross = 0.0, min_self = 1.0;
+  for (int f = 0; f < nf; ++f) {
+    dv_code *code[3];
+    for (int i = 0; i < 3; ++i) {
+      code[i] = dv_code_create_standard(fam[f].v[i]);
+      assert(code[i] != NULL);
+    }
+    for (int i = 0; i < 3; ++i) {
+      for (int j = 0; j < 3; ++j) {
+        double m = lock_mean_cross(code[i], code[j]);
+        if (i == j) {
+          if (m < min_self) min_self = m;
+          assert(m > 0.9); /* a code locks onto its own stream */
+        } else {
+          if (m > max_cross) max_cross = m;
+          assert(m < 0.75); /* but not onto a sibling's */
+        }
+      }
+    }
+    for (int i = 0; i < 3; ++i) dv_code_destroy(code[i]);
+  }
+  printf("cross-lock within family: max sibling=%.3f, min self=%.3f\n",
+         max_cross, min_self);
+}
+
 static void test_error_paths(void) {
   /* Code creation rejects bad arguments by returning NULL. */
   assert(dv_code_create(1, GENERATORS, N_GEN) == NULL); /* K < 2 */
@@ -488,8 +706,8 @@ static void test_error_paths(void) {
 
   /* Streaming decode argument checks. */
   uint8_t out8 = 0;
-  assert(dv_stream_decode(NULL, &bit, 1, &out8, 1) == DV_ERR_ARG);
-  assert(dv_stream_decode(sd, NULL, 1, &out8, 1) == DV_ERR_ARG); /* null in */
+  assert(dv_stream_decode(NULL, &bit, 1, &out8, NULL, 1) == DV_ERR_ARG);
+  assert(dv_stream_decode(sd, NULL, 1, &out8, NULL, 1) == DV_ERR_ARG); /* null in */
   assert(dv_stream_decode_flush(NULL, &out8, 1) == DV_ERR_ARG);
 
   dv_stream_decoder_destroy(sd);
@@ -504,8 +722,11 @@ int main(void) {
   test_stream_reanchor();
   test_stream_midgroup_indel();
   test_standard_code();
+  test_all_presets();
   test_blind_acquisition();
   test_stream_flips_only();
+  test_lock_probability();
+  test_cross_lock_within_family();
   test_error_paths();
   printf("all tests passed\n");
   return 0;

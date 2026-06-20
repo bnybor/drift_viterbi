@@ -106,16 +106,48 @@ dv_code *dv_code_create_standard(dv_standard_code which) {
       static const unsigned int g[] = {007, 005};
       return dv_code_create(3, g, 2);
     }
+    case DV_CODE_K3_RATE_1_2_ALT1: {
+      static const unsigned int g[] = {001, 007};
+      return dv_code_create(3, g, 2);
+    }
+    case DV_CODE_K3_RATE_1_2_ALT2: {
+      static const unsigned int g[] = {006, 007};
+      return dv_code_create(3, g, 2);
+    }
     case DV_CODE_K7_RATE_1_2: {
       static const unsigned int g[] = {0171, 0133};
+      return dv_code_create(7, g, 2);
+    }
+    case DV_CODE_K7_RATE_1_2_ALT1: {
+      static const unsigned int g[] = {0112, 0167};
+      return dv_code_create(7, g, 2);
+    }
+    case DV_CODE_K7_RATE_1_2_ALT2: {
+      static const unsigned int g[] = {0067, 0115};
       return dv_code_create(7, g, 2);
     }
     case DV_CODE_K7_RATE_1_3: {
       static const unsigned int g[] = {0171, 0165, 0133};
       return dv_code_create(7, g, 3);
     }
+    case DV_CODE_K7_RATE_1_3_ALT1: {
+      static const unsigned int g[] = {0135, 0151, 0173};
+      return dv_code_create(7, g, 3);
+    }
+    case DV_CODE_K7_RATE_1_3_ALT2: {
+      static const unsigned int g[] = {0123, 0165, 0173};
+      return dv_code_create(7, g, 3);
+    }
     case DV_CODE_K5_RATE_1_5: {
       static const unsigned int g[] = {037, 033, 025, 027, 035};
+      return dv_code_create(5, g, 5);
+    }
+    case DV_CODE_K5_RATE_1_5_ALT1: {
+      static const unsigned int g[] = {023, 025, 033, 035, 037};
+      return dv_code_create(5, g, 5);
+    }
+    case DV_CODE_K5_RATE_1_5_ALT2: {
+      static const unsigned int g[] = {025, 027, 031, 033, 037};
       return dv_code_create(5, g, 5);
     }
   }
@@ -219,6 +251,10 @@ struct dv_stream_decoder {
   int n, D, S, W, L;
   /* Branch-metric constants, in cost (negative-log-likelihood) units. */
   double c_match, c_miss, c_erase, c_keep, c_ins, c_del;
+  /* Lock detection: per-step best-path cost expected when the input really is
+   * this code's stream (e_lock) vs. when a quarter-ish of coded bits don't fit
+   * it (e_unlock), and an EWMA of the observed cost. */
+  double e_lock, e_unlock, cost_ewma;
 
   double *metric;  /* [S*W], node-at-current-time costs            */
   double *nmetric; /* [S*W], scratch                               */
@@ -353,21 +389,27 @@ static void align_fill(const struct dv_stream_decoder *sd,
 }
 
 /* Subtract the lowest node cost from every node, so the best one sits at 0.
- * Over an unbounded stream this keeps the costs from growing without limit. */
-static void normalize(double *metric, size_t count) {
+ * Over an unbounded stream this keeps the costs from growing without limit.
+ * Over an unbounded stream this keeps the costs from growing without limit.
+ * Returns the amount subtracted: the best path's cost increment this step. */
+static double normalize(double *metric, size_t count) {
   double lowest = INFINITY;
   for (size_t i = 0; i < count; ++i) {
     if (metric[i] < lowest) {
       lowest = metric[i];
     }
   }
-  if (lowest != INFINITY && lowest > 0.0) {
+  if (lowest == INFINITY) {
+    return 0.0;
+  }
+  if (lowest > 0.0) {
     for (size_t i = 0; i < count; ++i) {
       if (metric[i] != INFINITY) {
         metric[i] -= lowest;
       }
     }
   }
+  return lowest;
 }
 
 /* Shift the drift window by `sigma` (each node's drift index di -> di - sigma)
@@ -448,7 +490,9 @@ static void stream_step(struct dv_stream_decoder *sd) {
     }
   }
 
-  normalize(sd->nmetric, count);
+  const double increment = normalize(sd->nmetric, count);
+  const double alpha = 2.0 / (sd->L + 1.0);
+  sd->cost_ewma += alpha * (increment - sd->cost_ewma);
 
   double *tmp = sd->metric;
   sd->metric = sd->nmetric;
@@ -478,10 +522,37 @@ static unsigned char trace_bit(const struct dv_stream_decoder *sd, int frontier,
   return bit;
 }
 
+/* Probability that the decoder is locked onto a valid stream of THIS specific
+ * code, from the best surviving path's cost rate (an EWMA, see stream_step). A
+ * path can only stay cheap if the received bits actually fit this code's
+ * codewords; a different code's stream - even one of the same rate and
+ * constraint length - forces mismatches that raise the cost. Map the smoothed
+ * cost linearly from e_lock (a clean lock -> ~1) to e_unlock (enough misfit that
+ * it clearly is not this code -> ~0).
+ *
+ * This is what makes the value code-specific rather than a generic "is some path
+ * dominant?" confidence: a confidently decoded WRONG code is dominant but
+ * expensive, so it reads as unlocked. (Two encoders for the SAME code are not
+ * "wrong" - they share codewords - and correctly read as locked.) */
+static double lock_prob(const struct dv_stream_decoder *sd) {
+  const double gap = sd->e_unlock - sd->e_lock;
+  if (gap <= 0.0) {
+    return 0.0;
+  }
+  double p = (sd->e_unlock - sd->cost_ewma) / gap;
+  if (p < 0.0) {
+    p = 0.0;
+  } else if (p > 1.0) {
+    p = 1.0;
+  }
+  return p;
+}
+
 /* Process steps, emitting forced decisions, until input/output limits hit.
+ * Each emitted bit's lock probability is written to lock[] when non-NULL.
  * `draining` relaxes the look-ahead requirement for end-of-stream. */
-static int run(struct dv_stream_decoder *sd, uint8_t *out, int max_out,
-               int draining) {
+static int run(struct dv_stream_decoder *sd, uint8_t *out, double *lock,
+               int max_out, int draining) {
   int oc = 0;
   for (;;) {
     if (!draining) {
@@ -500,6 +571,9 @@ static int run(struct dv_stream_decoder *sd, uint8_t *out, int max_out,
     if (sd->steps >= sd->L) {
       if (oc >= max_out) {
         break;
+      }
+      if (lock) {
+        lock[oc] = lock_prob(sd);
       }
       out[oc++] = trace_bit(sd, frontier_best(sd), sd->decided);
       sd->decided++;
@@ -574,6 +648,22 @@ dv_stream_decoder *dv_stream_decoder_create(const dv_code *code,
   sd->c_ins = -log(p_ins);
   sd->c_del = -log(p_del);
 
+  /* Lock anchors (per step = n coded bits). A "kept" coded bit costs c_keep plus
+   * a match/miss term; the expected misfit fraction is p_sub when locked, and we
+   * call it "unlocked" once misfit reaches the midpoint between p_sub and 0.5
+   * (random). Erased bits contribute c_erase to both. */
+  const double f_lock = p_sub;
+  const double f_unlock = 0.5 * (p_sub + 0.5);
+  const double erase_term = p_erase > 0.0 ? p_erase * sd->c_erase : 0.0;
+  const double kept = 1.0 - p_erase;
+  sd->e_lock =
+      sd->n * (sd->c_keep + erase_term +
+               kept * ((1.0 - f_lock) * sd->c_match + f_lock * sd->c_miss));
+  sd->e_unlock =
+      sd->n * (sd->c_keep + erase_term +
+               kept * ((1.0 - f_unlock) * sd->c_match + f_unlock * sd->c_miss));
+  sd->cost_ewma = sd->e_unlock; /* assume unlocked until the stream proves it */
+
   const size_t count = (size_t)sd->S * sd->W;
   sd->metric = malloc(count * sizeof(double));
   sd->nmetric = malloc(count * sizeof(double));
@@ -607,7 +697,7 @@ void dv_stream_decoder_destroy(dv_stream_decoder *sd) {
 }
 
 int dv_stream_decode(dv_stream_decoder *sd, const uint8_t *in, int n_in,
-                     uint8_t *out, int max_out) {
+                     uint8_t *out, double *lock_probability, int max_out) {
   if (!sd || (n_in > 0 && !in) || n_in < 0 || (max_out > 0 && !out) ||
       max_out < 0) {
     return DV_ERR_ARG;
@@ -618,14 +708,14 @@ int dv_stream_decode(dv_stream_decoder *sd, const uint8_t *in, int n_in,
   }
   memcpy(sd->rbuf + sd->rlen, in, (size_t)n_in);
   sd->rlen += n_in;
-  return run(sd, out, max_out, /*draining=*/0);
+  return run(sd, out, lock_probability, max_out, /*draining=*/0);
 }
 
 int dv_stream_decode_flush(dv_stream_decoder *sd, uint8_t *out, int max_out) {
   if (!sd || (max_out > 0 && !out) || max_out < 0) {
     return DV_ERR_ARG;
   }
-  int oc = run(sd, out, max_out, /*draining=*/1);
+  int oc = run(sd, out, /*lock=*/NULL, max_out, /*draining=*/1);
 
   /* Drain the pipeline: decide the remaining buffered steps from the final
    * frontier (reduced traceback depth for the last <= L bits). */

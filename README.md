@@ -34,7 +34,7 @@ dv_stream_decoder *d = dv_stream_decoder_create(code, &(dv_stream_params){
 });
 
 uint8_t decoded[OUT];
-int n = dv_stream_decode(d, in, n_in, decoded, OUT);   /* feed + collect bits */
+int n = dv_stream_decode(d, in, n_in, decoded, NULL, OUT); /* feed + collect bits */
 /* ... repeat as more bits arrive ... */
 while (dv_stream_decode_flush(d, decoded, OUT) > 0)    /* drain at the end */
     /* use the decoded bits */ ;
