@@ -493,7 +493,11 @@ static const double DV_SELF_SATISFACTION_GOOD = 0.97;
 /*
  * Recover a stream's dual basis into basis[] (capacity DV_HARD_WINDOW_CAP) and
  * return its dimension. Returns -1 on allocation failure, 0 if no reliable
- * basis emerged (e.g. an unstructured stream).
+ * basis emerged (e.g. an unstructured stream). When self_satisfaction_out is
+ * non-NULL it receives the best candidate's whole-stream self
+ * cross-satisfaction
+ * (~1.0 for a clean coded stream, ~0.5 for noise), a graded measure of how well
+ * the stream fits a code - used by dv_detect.
  *
  * The fixed slide-by-n histogram needs a clean frame, but cumulative drift
  * misframes it: under deletions a single dropped bit shifts every later window,
@@ -510,7 +514,8 @@ static const double DV_SELF_SATISFACTION_GOOD = 0.97;
  * first segment, preserving the original behaviour.
  */
 static int recover_basis(const uint8_t *stream, size_t len, int n,
-                         int window_bits, uint32_t *basis) {
+                         int window_bits, uint32_t *basis,
+                         double *self_satisfaction_out) {
   const long min_windows = dv_min_recovery_windows(n, window_bits);
   /* Segment window count: large enough to pin the dual space without admitting
    * spurious checks, short enough to fit inside a typical clean run. */
@@ -546,6 +551,9 @@ static int recover_basis(const uint8_t *stream, size_t len, int n,
         break;
       }
     }
+  }
+  if (self_satisfaction_out) {
+    *self_satisfaction_out = best_self_satisfaction;
   }
   return best_self_satisfaction >= DV_SELF_SATISFACTION_FLOOR ? best_dimension
                                                               : 0;
@@ -590,6 +598,12 @@ long dv_compare_max_len(int n, int k) {
   return (long)window_bits + (DV_MAX_CROSS_WINDOWS - 1) * (long)n;
 }
 
+/* dv_detect runs the same single-stream code recovery that dv_compare applies
+ * to each of its two inputs, so it has the same per-sample length requirements.
+ */
+long dv_detect_min_len(int n, int k) { return dv_compare_min_len(n, k); }
+long dv_detect_max_len(int n, int k) { return dv_compare_max_len(n, k); }
+
 double dv_compare(int n, int k, uint8_t *lhs, size_t lhs_len, uint8_t *rhs,
                   size_t rhs_len) {
   if (!lhs || !rhs) {
@@ -616,8 +630,10 @@ double dv_compare(int n, int k, uint8_t *lhs, size_t lhs_len, uint8_t *rhs,
 
   uint32_t basis_lhs[DV_HARD_WINDOW_CAP];
   uint32_t basis_rhs[DV_HARD_WINDOW_CAP];
-  int dimension_lhs = recover_basis(lhs, lhs_len, n, window_bits, basis_lhs);
-  int dimension_rhs = recover_basis(rhs, rhs_len, n, window_bits, basis_rhs);
+  int dimension_lhs =
+      recover_basis(lhs, lhs_len, n, window_bits, basis_lhs, NULL);
+  int dimension_rhs =
+      recover_basis(rhs, rhs_len, n, window_bits, basis_rhs, NULL);
   if (dimension_lhs < 0 || dimension_rhs < 0) {
     return DV_UNDETERMINED; /* allocation failure */
   }
@@ -650,4 +666,48 @@ double dv_compare(int n, int k, uint8_t *lhs, size_t lhs_len, uint8_t *rhs,
 
   return (cross_lhs_on_rhs < cross_rhs_on_lhs) ? cross_lhs_on_rhs
                                                : cross_rhs_on_lhs;
+}
+
+/*
+ * Detect whether a single buffer carries any rate-1/n, constraint-length-k
+ * convolutional code, without identifying which one. Same recovery pipeline as
+ * one side of dv_compare: blindly recover the stream's own dual (parity-check)
+ * space and measure how well the stream satisfies it. A genuine coded stream
+ * obeys its checks (~1), random data does not (~0). Indel tolerance comes from
+ * the drift-tolerant offset path in cross-satisfaction and erasure/substitution
+ * tolerance from the segment scan, exactly as in dv_compare.
+ *
+ * Returns the probability in [0, 1], or a negative value when it cannot be
+ * determined (null buffer, out-of-range code, or too little data).
+ */
+double dv_detect(int n, int k, uint8_t *sample, size_t len) {
+  if (!sample) {
+    return DV_UNDETERMINED;
+  }
+  const int window_bits = dv_window_bits(n, k);
+  if (window_bits == 0) {
+    return DV_UNDETERMINED;
+  }
+  if (len < (size_t)window_bits) {
+    return DV_UNDETERMINED;
+  }
+  const long min_windows = dv_min_recovery_windows(n, window_bits);
+  const long windows = (long)((len - (size_t)window_bits) / (size_t)n) + 1;
+  if (windows < min_windows) {
+    return DV_UNDETERMINED;
+  }
+
+  uint32_t basis[DV_HARD_WINDOW_CAP];
+  double self_satisfaction = 0.0;
+  const int dimension =
+      recover_basis(sample, len, n, window_bits, basis, &self_satisfaction);
+  if (dimension < 0) {
+    return DV_UNDETERMINED; /* allocation failure */
+  }
+  if (dimension == 0) {
+    return 0.0; /* no self-validating dual structure -> no code present */
+  }
+  /* Map the self cross-satisfaction (~1 clean, the floor when barely detected)
+   * onto a probability - the single-stream analog of dv_compare's rescale. */
+  return dv_clamp01(2.0 * (self_satisfaction - 0.5));
 }

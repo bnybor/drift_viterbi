@@ -36,6 +36,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 /* -- deterministic PRNG (splitmix64) --------------------------------------- */
 
@@ -85,6 +86,16 @@ static size_t delete_channel(const uint8_t *in, size_t len, double p_del,
     out[o++] = in[i];
   }
   return o;
+}
+
+/* Mark each bit DV_ERASURE with probability p_erase, in place. */
+static void erase_channel(uint8_t *buf, size_t len, double p_erase,
+                          uint64_t *rng) {
+  for (size_t i = 0; i < len; ++i) {
+    if (rng_unit(rng) < p_erase) {
+      buf[i] = DV_ERASURE;
+    }
+  }
 }
 
 #define INFO_BITS 4000
@@ -385,6 +396,13 @@ static void test_len_helpers(uint64_t seed) {
   fail += !(max_len > min_len);
   printf("  K7_R1_2: min_len=%ld max_len=%ld\n", min_len, max_len);
 
+  /* dv_detect runs the same single-stream recovery, so its length range matches
+   * dv_compare's and obeys the same out-of-range contract. */
+  fail += !(dv_detect_min_len(n, k) == min_len);
+  fail += !(dv_detect_max_len(n, k) == max_len);
+  fail += !(dv_detect_min_len(5, 9) < 0); /* window 5*10 = 50 > 32 */
+  fail += !(dv_detect_max_len(1, 1) < 0); /* k < 2 */
+
   /* Below min_len dv_compare must always be UNDETERMINED (the firm guarantee);
    * a sample comfortably above the floor recovers. Distinct messages so it is a
    * genuine recovery, not a self-comparison. */
@@ -420,6 +438,68 @@ static void test_len_helpers(uint64_t seed) {
   free(msg);
 }
 
+/* 8. dv_detect: does a single buffer carry any code at (n, k)? Clean coded data
+ *    detects high; random data low; and detection survives indels and erasures,
+ * like dv_compare. Too-short, out-of-range, or null inputs are undetermined. */
+static void test_detect(uint64_t seed) {
+  printf("test_detect\n");
+  int fail = 0;
+  const dv_standard_code codes[] = {DV_CODE_K3_RATE_1_2, DV_CODE_K7_RATE_1_2,
+                                    DV_CODE_K7_RATE_1_3, DV_CODE_K5_RATE_1_5};
+  const char *names[] = {"K3_R1_2", "K7_R1_2", "K7_R1_3", "K5_R1_5"};
+  const int info_bits = 1500;
+
+  uint8_t *msg = malloc((size_t)info_bits);
+  uint8_t *coded = malloc(CODED_CAP);
+  uint8_t *chan = malloc(CODED_CAP);
+
+  for (int c = 0; c < 4; ++c) {
+    uint64_t rng = seed + 700 + (uint64_t)c;
+    int n, k;
+    rand_bits(msg, info_bits, &rng);
+    size_t clen = encode(codes[c], msg, info_bits, coded, &n, &k);
+
+    double clean = dv_detect(n, k, coded, clen);
+
+    size_t dlen = delete_channel(coded, clen, 0.01, &rng, chan);
+    double indel = dv_detect(n, k, chan, dlen);
+
+    memcpy(chan, coded, clen);
+    erase_channel(chan, clen, 0.04, &rng);
+    double erased = dv_detect(n, k, chan, clen);
+
+    int ok = clean > 0.8 && indel > 0.7 && erased > 0.7;
+    printf("  %-7s clean=%.3f indel=%.3f erased=%.3f  %s\n", names[c], clean,
+           indel, erased, ok ? "PASS" : "FAIL");
+    fail += !ok;
+  }
+
+  /* Random (non-coded) buffer -> low. */
+  {
+    uint64_t rng = seed + 800;
+    rand_bits(coded, 3000, &rng);
+    double rnd = dv_detect(2, 7, coded, 3000); /* K7_R1_2 parameters */
+    int ok = rnd < 0.3;
+    printf("  random:  %.3f  %s\n", rnd, ok ? "PASS" : "FAIL");
+    fail += !ok;
+  }
+
+  /* Too short, out-of-range, and null -> undetermined (negative). */
+  fail += !(dv_detect(2, 7, coded, 8) < 0);    /* below one window */
+  fail += !(dv_detect(5, 9, coded, 3000) < 0); /* window 5*10 = 50 > 32 */
+  fail += !(dv_detect(2, 7, NULL, 3000) < 0);  /* null buffer */
+
+  if (fail) {
+    printf("  %d detect check(s) FAILED\n", fail);
+    g_failures += fail;
+  } else {
+    printf("  all detect checks passed\n");
+  }
+  free(msg);
+  free(coded);
+  free(chan);
+}
+
 int main(void) {
   const uint64_t seed = 0xD1F7C0DEULL;
   test_clean_and_constant_offset(seed);
@@ -429,6 +509,7 @@ int main(void) {
   test_lock_matches_compare(seed);
   test_short_stream(seed);
   test_len_helpers(seed);
+  test_detect(seed);
 
   if (g_failures) {
     printf("\n%d check(s) FAILED\n", g_failures);

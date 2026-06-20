@@ -51,6 +51,29 @@ extern "C" {
 /* clang-format on */
 
 /*
+ * Probability that the buffer `sample` (of `len` bits) carries some rate-1/n,
+ * constraint-length-k convolutional code: ~1 when it does, ~0 when it does not.
+ * This only asks whether a code is present, not which one - to test whether two
+ * buffers share the same code, use dv_compare. Like dv_compare it recovers the
+ * code's structure blindly and tolerates substitution noise, erasures, and both
+ * constant and cumulative insertion/deletion drift. Returns a negative value
+ * when the result cannot be determined (null buffer, too little data, or a code
+ * whose relation window n*(k+1) exceeds 32).
+ */
+double dv_detect(int n, int k, uint8_t *sample, size_t len);
+
+/*
+ * The range of buffer lengths (in bits; one bit per byte) dv_detect can use for
+ * a given rate 1/n and constraint length k - the same meaning as the dv_compare
+ * pair below, applied to dv_detect's single buffer: dv_detect_min_len is the
+ * fewest bits needed before detection is attempted (fewer is undetermined), and
+ * dv_detect_max_len is the most bits it consults (a longer buffer may be
+ * truncated). Both return a negative value when (n, k) is out of range.
+ */
+long dv_detect_min_len(int n, int k);
+long dv_detect_max_len(int n, int k);
+
+/*
  * Probability that, for a given rate 1/n and constraint length k, the two
  * stream samples have consistent convolutional-code generator polynomials: ~1
  * when they share the code, ~0 when they do not. Works on streams of any length
