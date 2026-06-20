@@ -24,12 +24,13 @@
  */
 /* clang-format on */
 
-#include <drift_viterbi/drift_viterbi.h>
+/*
+ * Tests for the encoder and streaming decoder: chunked encoding, clean and
+ * noisy stream decoding (erasures, indels, re-anchoring, blind acquisition),
+ * the standard presets, lock probability, and argument handling.
+ */
 
-#include <assert.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include "dv_test_util.h"
 
 /* rate-1/5, K=5 code (matches the Python reference). */
 static const unsigned int GENERATORS[] = {037, 033, 025, 027, 035};
@@ -37,87 +38,21 @@ static const unsigned int GENERATORS[] = {037, 033, 025, 027, 035};
 #define N_GEN ((int)(sizeof(GENERATORS) / sizeof(GENERATORS[0])))
 
 static void test_version(void) {
+  printf("test_version\n");
   const char *v = drift_viterbi_version();
-  assert(v != NULL && strlen(v) > 0);
-  printf("drift_viterbi version: %s\n", v);
-}
-
-/* Build a decoder from positional settings (keeps tests concise). */
-static dv_stream_decoder *make_decoder(const dv_code *code, int depth,
-                                       int drift, double p_sub, double p_ins,
-                                       double p_del, double p_erase) {
-  dv_stream_params params = {
-      .decision_depth = depth,
-      .max_drift = drift,
-      .p_sub = p_sub,
-      .p_ins = p_ins,
-      .p_del = p_del,
-      .p_erase = p_erase,
-  };
-  return dv_stream_decoder_create(code, &params);
-}
-
-/* Push a whole received buffer through the streaming decoder in small chunks,
- * then drain. Returns the number of decoded bits collected. */
-static int stream_decode_all(dv_stream_decoder *sd, const uint8_t *rx, int rl,
-                             uint8_t *out, int cap) {
-  int got = 0;
-  for (int pos = 0; pos < rl;) {
-    int chunk = (rl - pos < 41) ? (rl - pos) : 41;
-    int w = dv_stream_decode(sd, rx + pos, chunk, out + got, NULL, cap - got);
-    assert(w >= 0);
-    got += w;
-    pos += chunk;
-  }
-  for (;;) {
-    int w = dv_stream_decode_flush(sd, out + got, cap - got);
-    assert(w >= 0);
-    if (w == 0) break;
-    got += w;
-  }
-  return got;
-}
-
-/* Encode a fixed message with `enc`, decode it with a fresh decoder for `dec`
- * (both must have the same output rate), and return the mean lock probability
- * over the locked second half. When enc != dec this measures whether one code's
- * stream is mistaken for the other's. */
-static double lock_mean_cross(const dv_code *enc, const dv_code *dec) {
-  enum { N_INFO = 600 };
-  uint8_t msg[N_INFO];
-  for (int i = 0; i < N_INFO; ++i) msg[i] = (uint8_t)((i * 7 + 3) & 1);
-
-  int clen = N_INFO * dv_code_n(enc);
-  uint8_t *coded = malloc((size_t)clen);
-  int st = 0;
-  assert(dv_code_encode(enc, msg, N_INFO, &st, coded) == clen);
-
-  dv_stream_decoder *sd = make_decoder(dec, 48, 4, 0.01, 0.01, 0.01, 0.0);
-  assert(sd != NULL);
-  int cap = N_INFO + 64;
-  uint8_t *out = malloc((size_t)cap);
-  double *lock = malloc((size_t)cap * sizeof(double));
-  int got = dv_stream_decode(sd, coded, clen, out, lock, cap);
-  assert(got > 0);
-
-  double sum = 0.0;
-  for (int i = got / 2; i < got; ++i) sum += lock[i];
-  double m = sum / (got - got / 2);
-
-  dv_stream_decoder_destroy(sd);
-  free(lock);
-  free(out);
-  free(coded);
-  return m;
+  REQUIRE("version non-null", v != NULL);
+  check("version non-empty", strlen(v) > 0);
+  printf("  drift_viterbi version: %s\n", v);
 }
 
 /* The streaming encoder is stateful: encoding in chunks (plus a final flush)
  * must match encoding the whole message in one call, and end in state 0. */
 static void test_encode_stream(void) {
+  printf("test_encode_stream\n");
   dv_code *code = dv_code_create(K, GENERATORS, N_GEN);
-  assert(code != NULL);
-  assert(dv_code_n(code) == N_GEN);
-  assert(dv_code_k(code) == K);
+  REQUIRE("code created", code != NULL);
+  check("code n", dv_code_n(code) == N_GEN);
+  check("code k", dv_code_k(code) == K);
 
   const int n_info = 200;
   uint8_t *msg = malloc((size_t)n_info);
@@ -130,25 +65,24 @@ static void test_encode_stream(void) {
   int rstate = 0, ri = 0;
   ri += dv_code_encode(code, msg, n_info, &rstate, ref);
   ri += dv_code_encode_flush(code, &rstate, ref + ri);
-  assert(ri == total_len && rstate == 0);
+  check("one-shot length and end state", ri == total_len && rstate == 0);
 
   uint8_t *out = malloc((size_t)total_len);
   int state = 0, oi = 0;
   const int n1 = 80, n2 = n_info - n1;
   int w = dv_code_encode(code, msg, n1, &state, out);
-  assert(w == n1 * N_GEN);
+  check("chunk 1 length", w == n1 * N_GEN);
   oi += w;
   w = dv_code_encode(code, msg + n1, n2, &state, out + oi);
-  assert(w == n2 * N_GEN);
+  check("chunk 2 length", w == n2 * N_GEN);
   oi += w;
   w = dv_code_encode_flush(code, &state, out + oi);
-  assert(w == (K - 1) * N_GEN);
+  check("flush length", w == (K - 1) * N_GEN);
   oi += w;
 
-  assert(oi == total_len && state == 0);
-  assert(memcmp(out, ref, (size_t)total_len) == 0);
-  printf("encode stream: %d bits, chunked matches one-shot, end state=%d\n", oi,
-         state);
+  check("chunked total length and end state", oi == total_len && state == 0);
+  check("chunked matches one-shot", memcmp(out, ref, (size_t)total_len) == 0);
+  printf("  %d bits, chunked matches one-shot, end state=%d\n", oi, state);
 
   free(out);
   free(ref);
@@ -159,8 +93,9 @@ static void test_encode_stream(void) {
 /* A clean continuously-encoded stream, pushed through the sliding-window
  * decoder in small chunks, must come back out exactly. */
 static void test_stream_clean(void) {
+  printf("test_stream_clean\n");
   dv_code *code = dv_code_create(K, GENERATORS, N_GEN);
-  assert(code != NULL);
+  REQUIRE("code created", code != NULL);
 
   const int n_info = 300;
   uint8_t *msg = malloc((size_t)n_info);
@@ -169,19 +104,18 @@ static void test_stream_clean(void) {
   int clen = n_info * N_GEN;
   uint8_t *coded = malloc((size_t)clen);
   int st = 0;
-  assert(dv_code_encode(code, msg, n_info, &st, coded) == clen);
+  check("encode length", dv_code_encode(code, msg, n_info, &st, coded) == clen);
 
   dv_stream_decoder *sd = make_decoder(code, 40, 4, 0.01, 0.01, 0.01, 0.0);
-  assert(sd != NULL);
+  REQUIRE("decoder created", sd != NULL);
 
   uint8_t *outbuf = malloc((size_t)n_info + 16);
   int got = stream_decode_all(sd, coded, clen, outbuf, n_info + 16);
 
   int errors = 0;
   for (int i = 0; i < n_info; ++i) errors += (outbuf[i] != msg[i]);
-  printf("stream clean: decoded %d bits (msg %d), errors=%d\n", got, n_info,
-         errors);
-  assert(got == n_info && errors == 0);
+  printf("  decoded %d bits (msg %d), errors=%d\n", got, n_info, errors);
+  check("clean stream recovered exactly", got == n_info && errors == 0);
 
   dv_stream_decoder_destroy(sd);
   free(outbuf);
@@ -193,8 +127,9 @@ static void test_stream_clean(void) {
 /* A clean stream with a burst of received bits marked erased: the decoder
  * abstains on them and still recovers the message. */
 static void test_stream_erasures(void) {
+  printf("test_stream_erasures\n");
   dv_code *code = dv_code_create(K, GENERATORS, N_GEN);
-  assert(code != NULL);
+  REQUIRE("code created", code != NULL);
 
   const int n_info = 300;
   uint8_t *msg = malloc((size_t)n_info);
@@ -203,20 +138,19 @@ static void test_stream_erasures(void) {
   int clen = n_info * N_GEN;
   uint8_t *rx = malloc((size_t)clen);
   int st = 0;
-  assert(dv_code_encode(code, msg, n_info, &st, rx) == clen);
+  check("encode length", dv_code_encode(code, msg, n_info, &st, rx) == clen);
   for (int i = 700; i < 716; ++i) rx[i] = DV_ERASURE; /* 16-bit burst */
 
   dv_stream_decoder *sd = make_decoder(code, 40, 4, 0.01, 0.01, 0.01, 0.05);
-  assert(sd != NULL);
+  REQUIRE("decoder created", sd != NULL);
 
   uint8_t *outbuf = malloc((size_t)n_info + 16);
   int got = stream_decode_all(sd, rx, clen, outbuf, n_info + 16);
 
   int errors = 0;
   for (int i = 0; i < n_info; ++i) errors += (outbuf[i] != msg[i]);
-  printf("stream erasures: 16-bit burst, decoded %d bits, errors=%d\n", got,
-         errors);
-  assert(got == n_info && errors == 0);
+  printf("  16-bit erasure burst, decoded %d bits, errors=%d\n", got, errors);
+  check("recovered through erasure burst", got == n_info && errors == 0);
 
   dv_stream_decoder_destroy(sd);
   free(outbuf);
@@ -228,8 +162,9 @@ static void test_stream_erasures(void) {
 /* A long stream with periodic deletions: cumulative drift grows far past
  * max_drift, so only re-anchoring keeps the decoder locked. */
 static void test_stream_reanchor(void) {
+  printf("test_stream_reanchor\n");
   dv_code *code = dv_code_create(K, GENERATORS, N_GEN);
-  assert(code != NULL);
+  REQUIRE("code created", code != NULL);
 
   const int n_info = 400;
   uint8_t *msg = malloc((size_t)n_info);
@@ -238,7 +173,7 @@ static void test_stream_reanchor(void) {
   int clen = n_info * N_GEN; /* 2000 coded bits */
   uint8_t *coded = malloc((size_t)clen);
   int st = 0;
-  assert(dv_code_encode(code, msg, n_info, &st, coded) == clen);
+  check("encode length", dv_code_encode(code, msg, n_info, &st, coded) == clen);
 
   /* Delete one coded bit every 100 -> ~20 deletions, cumulative drift ~ -20. */
   const int del_period = 100;
@@ -253,7 +188,7 @@ static void test_stream_reanchor(void) {
   }
 
   dv_stream_decoder *sd = make_decoder(code, 48, 6, 0.01, 0.01, 0.01, 0.0);
-  assert(sd != NULL);
+  REQUIRE("decoder created", sd != NULL);
 
   int cap = n_info + 32;
   uint8_t *outbuf = malloc((size_t)cap);
@@ -263,12 +198,13 @@ static void test_stream_reanchor(void) {
   int errors = 0;
   for (int i = 0; i < cmp; ++i) errors += (outbuf[i] != msg[i]);
   printf(
-      "stream reanchor: %d deletions (cum drift -%d, max_drift 6), "
-      "decoded %d/%d bits, errors=%d\n",
+      "  %d deletions (cum drift -%d, max_drift 6), decoded %d/%d bits, "
+      "errors=%d\n",
       ndel, ndel, got, n_info, errors);
 
-  assert(got >= n_info - 2 && got <= n_info + 2);
-  assert(errors == 0); /* bit-level alignment recovers these deletions exactly */
+  check("output length within +/-2", got >= n_info - 2 && got <= n_info + 2);
+  /* bit-level alignment recovers these deletions exactly */
+  check("deletions recovered exactly", errors == 0);
 
   dv_stream_decoder_destroy(sd);
   free(outbuf);
@@ -283,8 +219,9 @@ static void test_stream_reanchor(void) {
  * clean stream is recovered essentially perfectly - the group holding the indel
  * is no longer smeared into a burst of substitution errors. */
 static void test_stream_midgroup_indel(void) {
+  printf("test_stream_midgroup_indel\n");
   dv_code *code = dv_code_create(K, GENERATORS, N_GEN); /* group size N_GEN=5 */
-  assert(code != NULL);
+  REQUIRE("code created", code != NULL);
 
   const int n_info = 400;
   uint8_t *msg = malloc((size_t)n_info);
@@ -293,7 +230,7 @@ static void test_stream_midgroup_indel(void) {
   int clen = n_info * N_GEN;
   uint8_t *coded = malloc((size_t)clen);
   int st = 0;
-  assert(dv_code_encode(code, msg, n_info, &st, coded) == clen);
+  check("encode length", dv_code_encode(code, msg, n_info, &st, coded) == clen);
 
   /* Drop a bit at phase 2 and insert one at phase 62 of every 120 coded bits.
    * 120 is a multiple of N_GEN, so both land at offset 2 within a group - mid
@@ -314,7 +251,7 @@ static void test_stream_midgroup_indel(void) {
   }
 
   dv_stream_decoder *sd = make_decoder(code, 48, 6, 0.01, 0.01, 0.01, 0.0);
-  assert(sd != NULL);
+  REQUIRE("decoder created", sd != NULL);
 
   int cap = n_info + 32;
   uint8_t *outbuf = malloc((size_t)cap);
@@ -324,12 +261,12 @@ static void test_stream_midgroup_indel(void) {
   int errors = 0;
   for (int i = 0; i < cmp; ++i) errors += (outbuf[i] != msg[i]);
   printf(
-      "stream mid-group indel: %d deletions + %d insertions mid-group, "
-      "decoded %d/%d bits, errors=%d\n",
+      "  %d deletions + %d insertions mid-group, decoded %d/%d bits, "
+      "errors=%d\n",
       ndel, nins, got, n_info, errors);
 
-  assert(got >= n_info - 2 && got <= n_info + 2);
-  assert(errors == 0);
+  check("output length within +/-2", got >= n_info - 2 && got <= n_info + 2);
+  check("mid-group indels recovered exactly", errors == 0);
 
   dv_stream_decoder_destroy(sd);
   free(outbuf);
@@ -341,10 +278,11 @@ static void test_stream_midgroup_indel(void) {
 
 /* A built-in standard code (K=7 rate 1/2) encodes and streams cleanly. */
 static void test_standard_code(void) {
+  printf("test_standard_code\n");
   dv_code *code = dv_code_create_standard(DV_CODE_K7_RATE_1_2);
-  assert(code != NULL);
-  assert(dv_code_n(code) == 2);
-  assert(dv_code_k(code) == 7);
+  REQUIRE("code created", code != NULL);
+  check("standard code n", dv_code_n(code) == 2);
+  check("standard code k", dv_code_k(code) == 7);
 
   const int n_info = 150;
   uint8_t *msg = malloc((size_t)n_info);
@@ -353,20 +291,21 @@ static void test_standard_code(void) {
   int clen = n_info * 2;
   uint8_t *coded = malloc((size_t)clen);
   int st = 0;
-  assert(dv_code_encode(code, msg, n_info, &st, coded) == clen);
+  check("encode length", dv_code_encode(code, msg, n_info, &st, coded) == clen);
 
   dv_stream_decoder *sd = make_decoder(code, 48, 4, 0.01, 0.01, 0.01, 0.0);
-  assert(sd != NULL);
+  REQUIRE("decoder created", sd != NULL);
 
   uint8_t *outbuf = malloc((size_t)n_info + 16);
   int got = stream_decode_all(sd, coded, clen, outbuf, n_info + 16);
 
   int errors = 0;
   for (int i = 0; i < n_info; ++i) errors += (outbuf[i] != msg[i]);
-  printf("standard K7R12: decoded %d bits, errors=%d\n", got, errors);
-  assert(got == n_info && errors == 0);
+  printf("  K7R12 decoded %d bits, errors=%d\n", got, errors);
+  check("standard code recovered exactly", got == n_info && errors == 0);
 
-  assert(dv_code_create_standard((dv_standard_code)999) == NULL);
+  check("bad preset rejected",
+        dv_code_create_standard((dv_standard_code)999) == NULL);
 
   dv_stream_decoder_destroy(sd);
   free(outbuf);
@@ -379,8 +318,9 @@ static void test_standard_code(void) {
  * decoder blind-acquires (always) and recovers the rest of the message after a
  * short transient. */
 static void test_blind_acquisition(void) {
+  printf("test_blind_acquisition\n");
   dv_code *code = dv_code_create(K, GENERATORS, N_GEN);
-  assert(code != NULL);
+  REQUIRE("code created", code != NULL);
 
   const int n_info = 400;
   uint8_t *msg = malloc((size_t)n_info);
@@ -389,7 +329,7 @@ static void test_blind_acquisition(void) {
   int clen = n_info * N_GEN;
   uint8_t *coded = malloc((size_t)clen);
   int st = 0;
-  assert(dv_code_encode(code, msg, n_info, &st, coded) == clen);
+  check("encode length", dv_code_encode(code, msg, n_info, &st, coded) == clen);
 
   /* Start decoding from input step 100 (a group boundary), where the encoder
    * state is some unknown non-zero value. */
@@ -399,7 +339,7 @@ static void test_blind_acquisition(void) {
   int avail = n_info - splice_step; /* input bits available */
 
   dv_stream_decoder *sd = make_decoder(code, 40, 4, 0.01, 0.01, 0.01, 0.0);
-  assert(sd != NULL);
+  REQUIRE("decoder created", sd != NULL);
 
   int cap = avail + 16;
   uint8_t *out = malloc((size_t)cap);
@@ -414,12 +354,10 @@ static void test_blind_acquisition(void) {
     errors += (out[j] != msg[splice_step + j]);
     counted++;
   }
-  printf(
-      "blind acquisition: spliced at step %d, decoded %d bits, "
-      "post-warmup errors=%d/%d\n",
-      splice_step, got, errors, counted);
-  assert(counted > 0);
-  assert(errors == 0);
+  printf("  spliced at step %d, decoded %d bits, post-warmup errors=%d/%d\n",
+         splice_step, got, errors, counted);
+  check("post-warmup bits counted", counted > 0);
+  check("post-warmup errors zero", errors == 0);
 
   dv_stream_decoder_destroy(sd);
   free(out);
@@ -431,8 +369,9 @@ static void test_blind_acquisition(void) {
 /* Minimal settings: leave max_drift (and the indel probabilities) at 0, so the
  * decoder corrects bit flips only. A few scattered flips are still fixed. */
 static void test_stream_flips_only(void) {
+  printf("test_stream_flips_only\n");
   dv_code *code = dv_code_create(K, GENERATORS, N_GEN);
-  assert(code != NULL);
+  REQUIRE("code created", code != NULL);
 
   const int n_info = 300;
   uint8_t *msg = malloc((size_t)n_info);
@@ -441,7 +380,7 @@ static void test_stream_flips_only(void) {
   int clen = n_info * N_GEN;
   uint8_t *rx = malloc((size_t)clen);
   int st = 0;
-  assert(dv_code_encode(code, msg, n_info, &st, rx) == clen);
+  check("encode length", dv_code_encode(code, msg, n_info, &st, rx) == clen);
 
   int flips[] = {123, 400, 777, 1100, 1450};
   const int nflip = (int)(sizeof(flips) / sizeof(flips[0]));
@@ -452,16 +391,15 @@ static void test_stream_flips_only(void) {
       .p_sub = 0.02,
   };
   dv_stream_decoder *sd = dv_stream_decoder_create(code, &params);
-  assert(sd != NULL);
+  REQUIRE("decoder created", sd != NULL);
 
   uint8_t *outbuf = malloc((size_t)n_info + 16);
   int got = stream_decode_all(sd, rx, clen, outbuf, n_info + 16);
 
   int errors = 0;
   for (int i = 0; i < n_info; ++i) errors += (outbuf[i] != msg[i]);
-  printf("stream flips-only: %d flips, decoded %d bits, errors=%d\n", nflip,
-         got, errors);
-  assert(got == n_info && errors == 0);
+  printf("  %d flips, decoded %d bits, errors=%d\n", nflip, got, errors);
+  check("flips corrected", got == n_info && errors == 0);
 
   dv_stream_decoder_destroy(sd);
   free(outbuf);
@@ -473,6 +411,7 @@ static void test_stream_flips_only(void) {
 /* Every standard preset (the four defaults plus their two alternates each) must
  * create, report the right rate/K, and round-trip a clean stream exactly. */
 static void test_all_presets(void) {
+  printf("test_all_presets\n");
   struct {
     dv_standard_code code;
     int n, k;
@@ -486,11 +425,14 @@ static void test_all_presets(void) {
   };
   const int np = (int)(sizeof(presets) / sizeof(presets[0]));
 
+  int all_ok = 1;
   for (int idx = 0; idx < np; ++idx) {
     dv_code *code = dv_code_create_standard(presets[idx].code);
-    assert(code != NULL);
-    assert(dv_code_n(code) == presets[idx].n);
-    assert(dv_code_k(code) == presets[idx].k);
+    REQUIRE("preset created", code != NULL);
+    if (dv_code_n(code) != presets[idx].n ||
+        dv_code_k(code) != presets[idx].k) {
+      all_ok = 0;
+    }
 
     const int n_info = 200;
     uint8_t msg[200];
@@ -498,32 +440,38 @@ static void test_all_presets(void) {
     int clen = n_info * presets[idx].n;
     uint8_t *coded = malloc((size_t)clen);
     int st = 0;
-    assert(dv_code_encode(code, msg, n_info, &st, coded) == clen);
+    if (dv_code_encode(code, msg, n_info, &st, coded) != clen) {
+      all_ok = 0;
+    }
 
     dv_stream_decoder *sd =
         make_decoder(code, 8 * presets[idx].k, 4, 0.01, 0.01, 0.01, 0.0);
-    assert(sd != NULL);
+    REQUIRE("preset decoder created", sd != NULL);
     int cap = n_info + 32;
     uint8_t *out = malloc((size_t)cap);
     int got = stream_decode_all(sd, coded, clen, out, cap);
     int cmp = got < n_info ? got : n_info, errors = 0;
     for (int i = 0; i < cmp; ++i) errors += (out[i] != msg[i]);
-    assert(got == n_info && errors == 0);
+    if (got != n_info || errors != 0) {
+      all_ok = 0;
+    }
 
     dv_stream_decoder_destroy(sd);
     free(out);
     free(coded);
     dv_code_destroy(code);
   }
-  printf("all presets: %d codes create and round-trip cleanly\n", np);
+  printf("  %d presets create, report rate/K, and round-trip cleanly\n", np);
+  check("all presets round-trip cleanly", all_ok);
 }
 
 /* The lock-probability output rises to ~1 on a clean coded stream (the decoder
  * is synchronized) and stays low on random, non-coded input (it never locks).
  * A NULL lock pointer is also accepted. */
 static void test_lock_probability(void) {
+  printf("test_lock_probability\n");
   dv_code *code = dv_code_create(K, GENERATORS, N_GEN);
-  assert(code != NULL);
+  REQUIRE("code created", code != NULL);
 
   const int n_info = 600;
   uint8_t *msg = malloc((size_t)n_info);
@@ -532,7 +480,7 @@ static void test_lock_probability(void) {
   int clen = n_info * N_GEN;
   uint8_t *coded = malloc((size_t)clen);
   int st = 0;
-  assert(dv_code_encode(code, msg, n_info, &st, coded) == clen);
+  check("encode length", dv_code_encode(code, msg, n_info, &st, coded) == clen);
 
   int cap = n_info + 32;
   uint8_t *out = malloc((size_t)cap);
@@ -540,14 +488,16 @@ static void test_lock_probability(void) {
 
   /* Clean coded stream: feed it all at once, capturing per-bit lock prob. */
   dv_stream_decoder *sd = make_decoder(code, 48, 4, 0.01, 0.01, 0.01, 0.0);
-  assert(sd != NULL);
+  REQUIRE("decoder created", sd != NULL);
   int got = dv_stream_decode(sd, coded, clen, out, lock, cap);
-  assert(got > 0);
+  REQUIRE("clean decode produced output", got > 0);
   double clean_sum = 0.0;
+  int prob_in_range = 1;
   for (int i = 0; i < got; ++i) {
-    assert(lock[i] > 0.0 && lock[i] <= 1.0 + 1e-9); /* it is a probability */
+    if (!(lock[i] > 0.0 && lock[i] <= 1.0 + 1e-9)) prob_in_range = 0;
     if (i >= got / 2) clean_sum += lock[i];
   }
+  check("lock values are probabilities", prob_in_range);
   double clean_mean = clean_sum / (got - got / 2);
   dv_stream_decoder_destroy(sd);
 
@@ -560,24 +510,24 @@ static void test_lock_probability(void) {
     rnd[i] = (uint8_t)((lcg >> 40) & 1u);
   }
   sd = make_decoder(code, 48, 4, 0.01, 0.01, 0.01, 0.0);
-  assert(sd != NULL);
+  REQUIRE("decoder created", sd != NULL);
   int got2 = dv_stream_decode(sd, rnd, clen, out, lock, cap);
-  assert(got2 > 0);
+  REQUIRE("random decode produced output", got2 > 0);
   double rnd_sum = 0.0;
   for (int i = got2 / 2; i < got2; ++i) rnd_sum += lock[i];
   double rnd_mean = rnd_sum / (got2 - got2 / 2);
   dv_stream_decoder_destroy(sd);
 
-  printf("lock probability: clean mean=%.3f, random mean=%.3f\n", clean_mean,
-         rnd_mean);
-  assert(clean_mean > 0.85);              /* locked on real coded data */
-  assert(rnd_mean < 0.6);                 /* never locks on noise       */
-  assert(clean_mean - rnd_mean > 0.3);    /* clearly discriminates       */
+  printf("  clean mean=%.3f, random mean=%.3f\n", clean_mean, rnd_mean);
+  check_gt("locked on coded data", clean_mean, 0.85);
+  check_lt("never locks on noise", rnd_mean, 0.6);
+  check_gt("clean vs random margin", clean_mean - rnd_mean, 0.3);
 
   /* A NULL lock pointer must be accepted and decode normally. */
   sd = make_decoder(code, 48, 4, 0.01, 0.01, 0.01, 0.0);
-  assert(sd != NULL);
-  assert(dv_stream_decode(sd, coded, clen, out, NULL, cap) > 0);
+  REQUIRE("decoder created", sd != NULL);
+  check("NULL lock pointer accepted",
+        dv_stream_decode(sd, coded, clen, out, NULL, cap) > 0);
   dv_stream_decoder_destroy(sd);
 
   free(lock);
@@ -592,19 +542,23 @@ static void test_lock_probability(void) {
    * decoder - only the matching code locks. */
   dv_code *k3 = dv_code_create_standard(DV_CODE_K3_RATE_1_2);
   dv_code *k7 = dv_code_create_standard(DV_CODE_K7_RATE_1_2);
-  assert(k3 != NULL && k7 != NULL);
+  REQUIRE("k3 and k7 created", k3 != NULL && k7 != NULL);
 
-  double k3_k3 = lock_mean_cross(k3, k3);
-  double k7_k7 = lock_mean_cross(k7, k7);
-  double k3_k7 = lock_mean_cross(k3, k7);
-  double k7_k3 = lock_mean_cross(k7, k3);
-  printf(
-      "lock probability: match k3=%.3f k7=%.3f, cross k3->k7=%.3f k7->k3=%.3f\n",
-      k3_k3, k7_k7, k3_k7, k7_k3);
+  uint8_t lmsg[600];
+  for (int i = 0; i < 600; ++i) lmsg[i] = (uint8_t)((i * 7 + 3) & 1);
+  double k3_k3 = decoder_lock_mean(k3, k3, lmsg, 600, 48);
+  double k7_k7 = decoder_lock_mean(k7, k7, lmsg, 600, 48);
+  double k3_k7 = decoder_lock_mean(k3, k7, lmsg, 600, 48);
+  double k7_k3 = decoder_lock_mean(k7, k3, lmsg, 600, 48);
+  printf("  match k3=%.3f k7=%.3f, cross k3->k7=%.3f k7->k3=%.3f\n", k3_k3,
+         k7_k7, k3_k7, k7_k3);
 
-  assert(k3_k3 > 0.85 && k7_k7 > 0.85);          /* matching code locks       */
-  assert(k3_k7 < 0.75 && k7_k3 < 0.75);          /* the other code does not    */
-  assert(k3_k3 - k3_k7 > 0.3 && k7_k7 - k7_k3 > 0.3);
+  check_gt("k3 locks on its own stream", k3_k3, 0.85);
+  check_gt("k7 locks on its own stream", k7_k7, 0.85);
+  check_lt("k3 does not lock on k7", k3_k7, 0.75);
+  check_lt("k7 does not lock on k3", k7_k3, 0.75);
+  check_gt("k3 self vs cross margin", k3_k3 - k3_k7, 0.3);
+  check_gt("k7 self vs cross margin", k7_k7 - k7_k3, 0.3);
 
   dv_code_destroy(k3);
   dv_code_destroy(k7);
@@ -615,59 +569,68 @@ static void test_lock_probability(void) {
  * sibling's. (Across families - different K or rate - this is NOT guaranteed;
  * see the comment on dv_standard_code.) */
 static void test_cross_lock_within_family(void) {
+  printf("test_cross_lock_within_family\n");
   struct {
     const char *name;
     dv_standard_code v[3];
   } fam[] = {
       {"K3_R1_2",
-       {DV_CODE_K3_RATE_1_2, DV_CODE_K3_RATE_1_2_ALT1, DV_CODE_K3_RATE_1_2_ALT2}},
+       {DV_CODE_K3_RATE_1_2, DV_CODE_K3_RATE_1_2_ALT1,
+        DV_CODE_K3_RATE_1_2_ALT2}},
       {"K7_R1_2",
-       {DV_CODE_K7_RATE_1_2, DV_CODE_K7_RATE_1_2_ALT1, DV_CODE_K7_RATE_1_2_ALT2}},
+       {DV_CODE_K7_RATE_1_2, DV_CODE_K7_RATE_1_2_ALT1,
+        DV_CODE_K7_RATE_1_2_ALT2}},
       {"K7_R1_3",
-       {DV_CODE_K7_RATE_1_3, DV_CODE_K7_RATE_1_3_ALT1, DV_CODE_K7_RATE_1_3_ALT2}},
+       {DV_CODE_K7_RATE_1_3, DV_CODE_K7_RATE_1_3_ALT1,
+        DV_CODE_K7_RATE_1_3_ALT2}},
       {"K5_R1_5",
-       {DV_CODE_K5_RATE_1_5, DV_CODE_K5_RATE_1_5_ALT1, DV_CODE_K5_RATE_1_5_ALT2}},
+       {DV_CODE_K5_RATE_1_5, DV_CODE_K5_RATE_1_5_ALT1,
+        DV_CODE_K5_RATE_1_5_ALT2}},
   };
   const int nf = (int)(sizeof(fam) / sizeof(fam[0]));
+
+  uint8_t msg[600];
+  for (int i = 0; i < 600; ++i) msg[i] = (uint8_t)((i * 7 + 3) & 1);
 
   double max_cross = 0.0, min_self = 1.0;
   for (int f = 0; f < nf; ++f) {
     dv_code *code[3];
     for (int i = 0; i < 3; ++i) {
       code[i] = dv_code_create_standard(fam[f].v[i]);
-      assert(code[i] != NULL);
+      REQUIRE("family code created", code[i] != NULL);
     }
     for (int i = 0; i < 3; ++i) {
       for (int j = 0; j < 3; ++j) {
-        double m = lock_mean_cross(code[i], code[j]);
+        double m = decoder_lock_mean(code[i], code[j], msg, 600, 48);
         if (i == j) {
           if (m < min_self) min_self = m;
-          assert(m > 0.9); /* a code locks onto its own stream */
         } else {
           if (m > max_cross) max_cross = m;
-          assert(m < 0.75); /* but not onto a sibling's */
         }
       }
     }
     for (int i = 0; i < 3; ++i) dv_code_destroy(code[i]);
   }
-  printf("cross-lock within family: max sibling=%.3f, min self=%.3f\n",
-         max_cross, min_self);
+  printf("  max sibling=%.3f, min self=%.3f\n", max_cross, min_self);
+  check_gt("each code locks onto its own stream", min_self, 0.9);
+  check_lt("no code locks onto a sibling's", max_cross, 0.75);
 }
 
 static void test_error_paths(void) {
+  printf("test_error_paths\n");
   /* Code creation rejects bad arguments by returning NULL. */
-  assert(dv_code_create(1, GENERATORS, N_GEN) == NULL); /* K < 2 */
-  assert(dv_code_create(K, GENERATORS, 0) == NULL);     /* n < 1 */
-  assert(dv_code_n(NULL) == -1);
+  check("create rejects K<2", dv_code_create(1, GENERATORS, N_GEN) == NULL);
+  check("create rejects n<1", dv_code_create(K, GENERATORS, 0) == NULL);
+  check("dv_code_n(NULL) is -1", dv_code_n(NULL) == -1);
 
   dv_code *code = dv_code_create(K, GENERATORS, N_GEN);
-  assert(code != NULL);
+  REQUIRE("code created", code != NULL);
 
   /* Encoder rejects an out-of-range carried-in state. */
   uint8_t bit = DV_TRUE, obuf[N_GEN];
   int badstate = 1 << 20;
-  assert(dv_code_encode(code, &bit, 1, &badstate, obuf) == DV_ERR_ARG);
+  check("encode rejects bad state",
+        dv_code_encode(code, &bit, 1, &badstate, obuf) == DV_ERR_ARG);
 
   /* Decoder creation rejects bad settings by returning NULL. */
   dv_stream_params ok = {
@@ -677,38 +640,47 @@ static void test_error_paths(void) {
       .p_ins = 0.01,
       .p_del = 0.01,
   };
-  assert(dv_stream_decoder_create(NULL, &ok) == NULL);  /* null code   */
-  assert(dv_stream_decoder_create(code, NULL) == NULL); /* null params */
+  check("decoder rejects null code",
+        dv_stream_decoder_create(NULL, &ok) == NULL);
+  check("decoder rejects null params",
+        dv_stream_decoder_create(code, NULL) == NULL);
 
   dv_stream_params p;
   p = ok;
   p.decision_depth = 0;
-  assert(dv_stream_decoder_create(code, &p) == NULL);
+  check("decoder rejects depth 0", dv_stream_decoder_create(code, &p) == NULL);
   p = ok;
   p.max_drift = -1;
-  assert(dv_stream_decoder_create(code, &p) == NULL);
+  check("decoder rejects negative drift",
+        dv_stream_decoder_create(code, &p) == NULL);
   p = ok;
   p.p_sub = 0.0;
-  assert(dv_stream_decoder_create(code, &p) == NULL);
+  check("decoder rejects p_sub 0", dv_stream_decoder_create(code, &p) == NULL);
   p = ok;
   p.p_ins = p.p_del = 0.6;
-  assert(dv_stream_decoder_create(code, &p) == NULL);
+  check("decoder rejects p_ins+p_del>=1",
+        dv_stream_decoder_create(code, &p) == NULL);
   p = ok;
   p.p_erase = 1.0;
-  assert(dv_stream_decoder_create(code, &p) == NULL);
+  check("decoder rejects p_erase 1",
+        dv_stream_decoder_create(code, &p) == NULL);
   /* max_drift > 0 needs insertion/deletion probabilities. */
   p = ok;
   p.p_ins = p.p_del = 0.0;
-  assert(dv_stream_decoder_create(code, &p) == NULL);
+  check("decoder rejects drift without indel probs",
+        dv_stream_decoder_create(code, &p) == NULL);
 
   dv_stream_decoder *sd = dv_stream_decoder_create(code, &ok);
-  assert(sd != NULL);
+  REQUIRE("decoder created", sd != NULL);
 
   /* Streaming decode argument checks. */
   uint8_t out8 = 0;
-  assert(dv_stream_decode(NULL, &bit, 1, &out8, NULL, 1) == DV_ERR_ARG);
-  assert(dv_stream_decode(sd, NULL, 1, &out8, NULL, 1) == DV_ERR_ARG); /* null in */
-  assert(dv_stream_decode_flush(NULL, &out8, 1) == DV_ERR_ARG);
+  check("decode rejects null decoder",
+        dv_stream_decode(NULL, &bit, 1, &out8, NULL, 1) == DV_ERR_ARG);
+  check("decode rejects null input",
+        dv_stream_decode(sd, NULL, 1, &out8, NULL, 1) == DV_ERR_ARG);
+  check("flush rejects null decoder",
+        dv_stream_decode_flush(NULL, &out8, 1) == DV_ERR_ARG);
 
   dv_stream_decoder_destroy(sd);
   dv_code_destroy(code);
@@ -728,6 +700,5 @@ int main(void) {
   test_lock_probability();
   test_cross_lock_within_family();
   test_error_paths();
-  printf("all tests passed\n");
-  return 0;
+  return test_summary("decoder");
 }
