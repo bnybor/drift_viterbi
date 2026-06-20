@@ -1,0 +1,67 @@
+/* clang-format off */
+/*
+ * MIT License
+ *
+ * Copyright (c) 2026 Robyn Kirkman
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ */
+/* clang-format on */
+
+#ifndef DRIFT_VITERBI_COMPARE_H
+#define DRIFT_VITERBI_COMPARE_H
+
+#include <stddef.h>
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* clang-format off */
+/*
+ * drift_viterbi compare - decide, blindly, whether two received bit-streams were
+ * produced by convolutional codes with the *same* generator polynomials. Unlike
+ * the encoder and decoder this needs neither the code nor the transmitted bits:
+ * it recovers each stream's parity-check structure and tests one against the
+ * other, tolerating substitution noise and both constant and cumulative framing
+ * drift.
+ *
+ *   double p = dv_compare(n, k, lhs, lhs_len, rhs, rhs_len);
+ *
+ * Bits follow the drift_viterbi convention: one bit per byte (the low bit of
+ * each byte).
+ */
+/* clang-format on */
+
+/*
+ * Probability that, for a given rate 1/n and constraint length k, the two stream
+ * samples have consistent convolutional-code generator polynomials: ~1 when they
+ * share the code, ~0 when they do not. Returns a negative value when the result
+ * cannot be determined (bad arguments, too little data, or a code too large for
+ * this version).
+ */
+double dv_compare(int n, int k, uint8_t *lhs, size_t lhs_len, uint8_t *rhs,
+                  size_t rhs_len);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* DRIFT_VITERBI_COMPARE_H */

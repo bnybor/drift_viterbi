@@ -24,7 +24,7 @@
  */
 /* clang-format on */
 
-#include "drift_viterbi/drift_viterbi.h"
+#include <drift_viterbi/drift_viterbi.h>
 
 #include <assert.h>
 #include <stdio.h>

@@ -51,7 +51,7 @@
  * Usage: dv_metrics [trials] [info_bits] [seed]
  */
 
-#include "drift_viterbi/drift_viterbi.h"
+#include <drift_viterbi/drift_viterbi.h>
 
 #include <limits.h>
 #include <stdint.h>

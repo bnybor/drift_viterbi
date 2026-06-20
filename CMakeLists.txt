@@ -13,7 +13,9 @@ option(DRIFT_VITERBI_BUILD_BENCH "Build the drift_viterbi metrics harness" OFF)
 # ---- Library ----------------------------------------------------------------
 
 add_library(drift_viterbi
-    src/drift_viterbi.c)
+    src/encode.c
+    src/decode.c
+    src/compare.c)
 
 # Namespaced alias so the target can be used the same way whether this project
 # is consumed via add_subdirectory() or find_package().
