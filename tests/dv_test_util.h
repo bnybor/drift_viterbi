@@ -44,62 +44,86 @@
 
 /* -- check framework ------------------------------------------------------- */
 
-/* Failures counted per test executable (each test file is its own program). */
+/* Failures counted per test executable (each test file is its own program).
+ *
+ * The check helpers below run inside OpenMP-parallelised test loops, so every
+ * one updates `g_failures` and writes its PASS/FAIL line under the same named
+ * critical section: the counter stays race-free and lines never tear. Without
+ * OpenMP the `#pragma omp critical` is an ignored unknown pragma, so the same
+ * source compiles and behaves identically single-threaded. */
 static int g_failures = 0;
 
 /* Record a boolean outcome; print PASS/FAIL and return the condition so callers
  * can branch (see REQUIRE). */
 static inline int check(const char *name, int cond) {
-  printf("  [%s] %s\n", name, cond ? "PASS" : "FAIL");
-  if (!cond) {
-    ++g_failures;
+#pragma omp critical(dv_check)
+  {
+    printf("  [%s] %s\n", name, cond ? "PASS" : "FAIL");
+    if (!cond) {
+      ++g_failures;
+    }
   }
   return cond;
 }
 
 static inline void check_ge(const char *name, double got, double want) {
   int ok = got >= want;
-  printf("  [%s] %.4f (want >= %.4f) %s\n", name, got, want,
-         ok ? "PASS" : "FAIL");
-  if (!ok) {
-    ++g_failures;
+#pragma omp critical(dv_check)
+  {
+    printf("  [%s] %.4f (want >= %.4f) %s\n", name, got, want,
+           ok ? "PASS" : "FAIL");
+    if (!ok) {
+      ++g_failures;
+    }
   }
 }
 
 static inline void check_gt(const char *name, double got, double want) {
   int ok = got > want;
-  printf("  [%s] %.4f (want > %.4f) %s\n", name, got, want,
-         ok ? "PASS" : "FAIL");
-  if (!ok) {
-    ++g_failures;
+#pragma omp critical(dv_check)
+  {
+    printf("  [%s] %.4f (want > %.4f) %s\n", name, got, want,
+           ok ? "PASS" : "FAIL");
+    if (!ok) {
+      ++g_failures;
+    }
   }
 }
 
 static inline void check_le(const char *name, double got, double want) {
   int ok = got <= want;
-  printf("  [%s] %.4f (want <= %.4f) %s\n", name, got, want,
-         ok ? "PASS" : "FAIL");
-  if (!ok) {
-    ++g_failures;
+#pragma omp critical(dv_check)
+  {
+    printf("  [%s] %.4f (want <= %.4f) %s\n", name, got, want,
+           ok ? "PASS" : "FAIL");
+    if (!ok) {
+      ++g_failures;
+    }
   }
 }
 
 static inline void check_lt(const char *name, double got, double want) {
   int ok = got < want;
-  printf("  [%s] %.4f (want < %.4f) %s\n", name, got, want,
-         ok ? "PASS" : "FAIL");
-  if (!ok) {
-    ++g_failures;
+#pragma omp critical(dv_check)
+  {
+    printf("  [%s] %.4f (want < %.4f) %s\n", name, got, want,
+           ok ? "PASS" : "FAIL");
+    if (!ok) {
+      ++g_failures;
+    }
   }
 }
 
 /* A negative value is the "result could not be determined" signal. */
 static inline void check_undetermined(const char *name, double got) {
   int ok = got < 0.0;
-  printf("  [%s] %.4f (want < 0, undetermined) %s\n", name, got,
-         ok ? "PASS" : "FAIL");
-  if (!ok) {
-    ++g_failures;
+#pragma omp critical(dv_check)
+  {
+    printf("  [%s] %.4f (want < 0, undetermined) %s\n", name, got,
+           ok ? "PASS" : "FAIL");
+    if (!ok) {
+      ++g_failures;
+    }
   }
 }
 

@@ -40,10 +40,11 @@
 /* 1. Same code, no indels: clean agreement and a constant within-range skew. */
 static void test_clean_and_constant_offset(uint64_t seed) {
   printf("test_clean_and_constant_offset\n");
-  uint8_t *msg = malloc(INFO_BITS);
-  uint8_t *a = malloc(CODED_CAP);
-  uint8_t *b = malloc(CODED_CAP);
+#pragma omp parallel for schedule(dynamic)
   for (int t = 0; t < 3; ++t) {
+    uint8_t *msg = malloc(INFO_BITS);
+    uint8_t *a = malloc(CODED_CAP);
+    uint8_t *b = malloc(CODED_CAP);
     uint64_t rng = seed + (uint64_t)t;
     int n, k;
     rand_bits(msg, INFO_BITS, &rng);
@@ -56,21 +57,22 @@ static void test_clean_and_constant_offset(uint64_t seed) {
 
     /* Same stream skewed by a constant offset of 7 bits (<= DV_MAX_DRIFT). */
     check_ge("const-offset-7", dv_compare(n, k, a, la, a + 7, la - 7), 0.8);
+    free(msg);
+    free(a);
+    free(b);
   }
-  free(msg);
-  free(a);
-  free(b);
 }
 
 /* 2. Same code, one stream through a deletion channel that drifts well past the
  *    16-bit constant-offset limit. This is the headline capability. */
 static void test_cumulative_drift_same_code(uint64_t seed) {
   printf("test_cumulative_drift_same_code\n");
-  uint8_t *msg = malloc(INFO_BITS);
-  uint8_t *a = malloc(CODED_CAP);
-  uint8_t *c = malloc(CODED_CAP);
-  uint8_t *drift = malloc(CODED_CAP);
+#pragma omp parallel for schedule(dynamic)
   for (int t = 0; t < 3; ++t) {
+    uint8_t *msg = malloc(INFO_BITS);
+    uint8_t *a = malloc(CODED_CAP);
+    uint8_t *c = malloc(CODED_CAP);
+    uint8_t *drift = malloc(CODED_CAP);
     uint64_t rng = seed + 100 + (uint64_t)t;
     int n, k;
     rand_bits(msg, INFO_BITS, &rng);
@@ -80,11 +82,11 @@ static void test_cumulative_drift_same_code(uint64_t seed) {
     size_t ld = delete_channel(c, lc, P_DEL, &rng, drift);
 
     check_ge("cumulative-drift", dv_compare(n, k, a, la, drift, ld), 0.7);
+    free(msg);
+    free(a);
+    free(c);
+    free(drift);
   }
-  free(msg);
-  free(a);
-  free(c);
-  free(drift);
 }
 
 /* 3. Different codes (same rate/K, different polynomials), one drifted: must
@@ -92,11 +94,12 @@ static void test_cumulative_drift_same_code(uint64_t seed) {
  */
 static void test_different_codes_negative(uint64_t seed) {
   printf("test_different_codes_negative\n");
-  uint8_t *msg = malloc(INFO_BITS);
-  uint8_t *a = malloc(CODED_CAP);
-  uint8_t *d = malloc(CODED_CAP);
-  uint8_t *drift = malloc(CODED_CAP);
+#pragma omp parallel for schedule(dynamic)
   for (int t = 0; t < 3; ++t) {
+    uint8_t *msg = malloc(INFO_BITS);
+    uint8_t *a = malloc(CODED_CAP);
+    uint8_t *d = malloc(CODED_CAP);
+    uint8_t *drift = malloc(CODED_CAP);
     uint64_t rng = seed + 200 + (uint64_t)t;
     int n, k, n2, k2;
     rand_bits(msg, INFO_BITS, &rng);
@@ -106,20 +109,21 @@ static void test_different_codes_negative(uint64_t seed) {
     size_t ld = delete_channel(d, ldc, P_DEL, &rng, drift);
 
     check_le("different-codes", dv_compare(n, k, a, la, drift, ld), 0.3);
+    free(msg);
+    free(a);
+    free(d);
+    free(drift);
   }
-  free(msg);
-  free(a);
-  free(d);
-  free(drift);
 }
 
 /* 4. Structured stream vs. unstructured random: must read as different. */
 static void test_structured_vs_random(uint64_t seed) {
   printf("test_structured_vs_random\n");
-  uint8_t *msg = malloc(INFO_BITS);
-  uint8_t *a = malloc(CODED_CAP);
-  uint8_t *r = malloc(CODED_CAP);
+#pragma omp parallel for schedule(dynamic)
   for (int t = 0; t < 3; ++t) {
+    uint8_t *msg = malloc(INFO_BITS);
+    uint8_t *a = malloc(CODED_CAP);
+    uint8_t *r = malloc(CODED_CAP);
     uint64_t rng = seed + 300 + (uint64_t)t;
     int n, k;
     rand_bits(msg, INFO_BITS, &rng);
@@ -128,10 +132,10 @@ static void test_structured_vs_random(uint64_t seed) {
     rand_bits(r, (int)lr, &rng);
 
     check_le("structured-vs-random", dv_compare(n, k, a, la, r, lr), 0.3);
+    free(msg);
+    free(a);
+    free(r);
   }
-  free(msg);
-  free(a);
-  free(r);
 }
 
 /* 5. The decoder's lock_probability and dv_compare are two routes to the same
@@ -160,51 +164,56 @@ static void test_lock_matches_compare(uint64_t seed) {
   const double LOCK_SAME = 0.8;
   const double COMPARE_SAME = 0.5;
 
-  uint8_t *msg_a = malloc((size_t)info_bits);
-  uint8_t *msg_b = malloc((size_t)info_bits);
-  uint8_t *coded_a = malloc(CODED_CAP);
-  uint8_t *coded_b = malloc(CODED_CAP);
+  /* Flatten the family x i x j nest into one index so the 36 independent
+   * (decode + compare) trials - the suite's dominant cost - fan out across
+   * cores. Every trial allocates its own buffers, so there is nothing shared to
+   * race on; check() serialises only the PASS/FAIL bookkeeping. */
+  const int n_trials = n_families * 3 * 3;
+#pragma omp parallel for schedule(dynamic)
+  for (int idx = 0; idx < n_trials; ++idx) {
+    const int f = idx / 9;
+    const int i = (idx / 3) % 3;
+    const int j = idx % 3;
 
-  for (int f = 0; f < n_families; ++f) {
-    for (int i = 0; i < 3; ++i) {
-      for (int j = 0; j < 3; ++j) {
-        uint64_t rng = seed + (uint64_t)(f * 9 + i * 3 + j) + 1;
-        rand_bits(msg_a, info_bits, &rng);
-        rand_bits(msg_b, info_bits, &rng);
+    uint8_t *msg_a = malloc((size_t)info_bits);
+    uint8_t *msg_b = malloc((size_t)info_bits);
+    uint8_t *coded_a = malloc(CODED_CAP);
+    uint8_t *coded_b = malloc(CODED_CAP);
 
-        /* lock: decode code i's stream with code j's decoder. */
-        dv_code *enc = dv_code_create_standard(family[f][i]);
-        dv_code *dec = dv_code_create_standard(family[f][j]);
-        double lock =
-            decoder_lock_mean(enc, dec, msg_a, info_bits, 8 * dv_code_k(dec));
-        dv_code_destroy(enc);
-        dv_code_destroy(dec);
+    uint64_t rng = seed + (uint64_t)idx + 1;
+    rand_bits(msg_a, info_bits, &rng);
+    rand_bits(msg_b, info_bits, &rng);
 
-        /* compare: independent streams from code i and code j. */
-        int n, k, n2, k2;
-        size_t len_a = encode(family[f][i], msg_a, info_bits, coded_a, &n, &k);
-        size_t len_b =
-            encode(family[f][j], msg_b, info_bits, coded_b, &n2, &k2);
-        double compare = dv_compare(n, k, coded_a, len_a, coded_b, len_b);
+    /* lock: decode code i's stream with code j's decoder. */
+    dv_code *enc = dv_code_create_standard(family[f][i]);
+    dv_code *dec = dv_code_create_standard(family[f][j]);
+    double lock =
+        decoder_lock_mean(enc, dec, msg_a, info_bits, 8 * dv_code_k(dec));
+    dv_code_destroy(enc);
+    dv_code_destroy(dec);
 
-        int truth_same = (i == j);
-        int lock_same = lock > LOCK_SAME;
-        int compare_same = compare > COMPARE_SAME;
-        int ok = (lock_same == truth_same) && (compare_same == truth_same) &&
-                 (lock_same == compare_same);
-        printf("  %s [%d->%d] lock=%.3f compare=%.3f  truth=%-4s  %s\n",
-               family_name[f], i, j, lock, compare,
-               truth_same ? "same" : "diff", ok ? "PASS" : "FAIL");
-        if (!ok) {
-          ++g_failures;
-        }
-      }
-    }
+    /* compare: independent streams from code i and code j. */
+    int n, k, n2, k2;
+    size_t len_a = encode(family[f][i], msg_a, info_bits, coded_a, &n, &k);
+    size_t len_b = encode(family[f][j], msg_b, info_bits, coded_b, &n2, &k2);
+    double compare = dv_compare(n, k, coded_a, len_a, coded_b, len_b);
+
+    int truth_same = (i == j);
+    int lock_same = lock > LOCK_SAME;
+    int compare_same = compare > COMPARE_SAME;
+    int ok = (lock_same == truth_same) && (compare_same == truth_same) &&
+             (lock_same == compare_same);
+    char label[80];
+    snprintf(label, sizeof label, "%s [%d->%d] lock=%.3f compare=%.3f truth=%s",
+             family_name[f], i, j, lock, compare,
+             truth_same ? "same" : "diff");
+    check(label, ok);
+
+    free(msg_a);
+    free(msg_b);
+    free(coded_a);
+    free(coded_b);
   }
-  free(msg_a);
-  free(msg_b);
-  free(coded_a);
-  free(coded_b);
 }
 
 /* 6. Stream length: a moderately short same-code pair still recovers, while a

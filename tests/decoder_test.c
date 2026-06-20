@@ -589,27 +589,37 @@ static void test_cross_lock_within_family(void) {
   };
   const int nf = (int)(sizeof(fam) / sizeof(fam[0]));
 
+  /* `msg` is only ever read (decoder_lock_mean encodes a copy of it), so it
+   * stays shared across the parallel trials below. */
   uint8_t msg[600];
   for (int i = 0; i < 600; ++i) msg[i] = (uint8_t)((i * 7 + 3) & 1);
 
+  /* Flatten family x i x j into one index: every (encode-with-i, decode-with-j)
+   * lock measurement is independent, so the 36 trials fan out across cores.
+   * min_self / max_cross combine with OpenMP min/max reductions (and reduce to
+   * the plain serial updates when OpenMP is absent). */
   double max_cross = 0.0, min_self = 1.0;
-  for (int f = 0; f < nf; ++f) {
-    dv_code *code[3];
-    for (int i = 0; i < 3; ++i) {
-      code[i] = dv_code_create_standard(fam[f].v[i]);
-      REQUIRE("family code created", code[i] != NULL);
-    }
-    for (int i = 0; i < 3; ++i) {
-      for (int j = 0; j < 3; ++j) {
-        double m = decoder_lock_mean(code[i], code[j], msg, 600, 48);
-        if (i == j) {
-          if (m < min_self) min_self = m;
-        } else {
-          if (m > max_cross) max_cross = m;
-        }
+  const int n_trials = nf * 3 * 3;
+#pragma omp parallel for schedule(dynamic) reduction(max : max_cross) \
+    reduction(min : min_self)
+  for (int idx = 0; idx < n_trials; ++idx) {
+    const int f = idx / 9;
+    const int i = (idx / 3) % 3;
+    const int j = idx % 3;
+    dv_code *ci = dv_code_create_standard(fam[f].v[i]);
+    dv_code *cj = dv_code_create_standard(fam[f].v[j]);
+    if (!ci || !cj) {
+      check("family code created", 0);
+    } else {
+      double m = decoder_lock_mean(ci, cj, msg, 600, 48);
+      if (i == j) {
+        if (m < min_self) min_self = m;
+      } else {
+        if (m > max_cross) max_cross = m;
       }
     }
-    for (int i = 0; i < 3; ++i) dv_code_destroy(code[i]);
+    dv_code_destroy(ci);
+    dv_code_destroy(cj);
   }
   printf("  max sibling=%.3f, min self=%.3f\n", max_cross, min_self);
   check_gt("each code locks onto its own stream", min_self, 0.9);
