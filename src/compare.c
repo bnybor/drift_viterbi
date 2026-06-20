@@ -95,14 +95,35 @@ static const double DV_DUAL_SATISFACTION_THRESHOLD = 0.85;
 static const double DV_NOMINAL_P_SUB = 0.05;
 static const double DV_NOMINAL_P_INDEL = 0.02;
 
-/* Largest relation window (bits). Dual recovery uses a Walsh-Hadamard transform
- * over 2^window_bits bins, so window_bits is capped to bound time and memory.
- */
+/* Dual recovery is hybrid by window width. For window_bits <=
+ * DV_MAX_WINDOW_BITS it uses a Walsh-Hadamard transform over 2^window_bits bins
+ * (noise-robust but exponential, so the width is capped). Wider windows use an
+ * exact GF(2) null-space recovery instead (recover_segment_nullspace), which is
+ * linear in the window count and O(window_bits) in memory. */
 #define DV_MAX_WINDOW_BITS 22
 
+/* Hard ceiling on the relation window: parity vectors are packed into a
+ * uint32_t, so window_bits must fit. Codes whose window n*(k+1) exceeds this
+ * are undetermined (widening the bitvector to uint64_t would raise it to 64).
+ */
+#define DV_HARD_WINDOW_CAP 32
+
 /* Returned when the result cannot be determined (bad args, too little data, or
- * a code too large for this version). */
+ * a code whose relation window exceeds DV_HARD_WINDOW_CAP). */
 #define DV_UNDETERMINED (-1.0)
+
+/* Cap on the windows the cross-satisfaction DP processes, bounding time on very
+ * long streams; the dual space is global, so a prefix this size suffices. */
+#define DV_MAX_CROSS_WINDOWS 200000L
+
+/* Fewest windows a stream needs before recovery is attempted: roughly enough
+ * independent step-windows (one per n bits) to pin the dual space, plus margin.
+ * Below this dv_compare is undetermined; above it, a stream that is still too
+ * thin is caught by self-validation (see recover_basis). */
+static long dv_min_recovery_windows(int n, int window_bits) {
+  long floor = (long)(window_bits / n) + 8;
+  return floor < 8 ? 8 : floor;
+}
 
 /* -- helpers --------------------------------------------------------------- */
 
@@ -176,7 +197,7 @@ static int *dv_dual_spectrum(const uint8_t *stream, size_t len, int n,
 
 /*
  * Reduce all high-satisfaction parity vectors to a GF(2) basis (one pivot per
- * bit position). Fills basis[] (capacity DV_MAX_WINDOW_BITS) and returns its
+ * bit position). Fills basis[] (capacity DV_HARD_WINDOW_CAP) and returns its
  * dimension = the recovered dual space's dimension.
  */
 static int dv_dual_basis(const int *spectrum, long window_count,
@@ -212,6 +233,107 @@ static int dv_dual_basis(const int *spectrum, long window_count,
     }
   }
   return dimension;
+}
+
+/*
+ * Recover a dual basis from a segment WITHOUT enumerating 2^window_bits, for
+ * windows too wide for the WHT. The observed windows are codewords, so every
+ * parity vector is orthogonal (over GF(2)) to all of them: the dual space is
+ * the orthogonal complement of their span. We row-reduce the windows into a
+ * basis of the code (row) space, then read its null space straight off the
+ * reduced form. Fills basis[] (capacity DV_HARD_WINDOW_CAP) with up to
+ * window_bits - rank vectors and returns that count. Memory is O(window_bits);
+ * no allocation.
+ *
+ * The candidates are orthogonal to every window of THIS segment by
+ * construction, so they need no local satisfaction filter; a segment corrupted
+ * by a flip (or too short to span the code space) yields spurious vectors that
+ * the caller's whole-stream self cross-satisfaction then rejects, exactly as
+ * for the WHT path.
+ */
+static int recover_segment_nullspace(const uint8_t *stream, size_t len, int n,
+                                     int window_bits, long max_windows,
+                                     uint32_t *basis) {
+  long window_count = (long)((len - (size_t)window_bits) / (size_t)n) + 1;
+  if (max_windows > 0 && window_count > max_windows) {
+    window_count = max_windows;
+  }
+
+  /* Row-echelon basis of the code space: pivot[bit] (if set) has its leading 1
+   * at `bit`. Standard GF(2) elimination, the same idiom as dv_dual_basis. */
+  uint32_t pivot[DV_HARD_WINDOW_CAP];
+  memset(pivot, 0, sizeof(pivot));
+  for (long window_index = 0; window_index < window_count; ++window_index) {
+    uint32_t row =
+        dv_window(stream, (size_t)window_index * (size_t)n, window_bits);
+    for (int bit = window_bits - 1; bit >= 0 && row; --bit) {
+      if (!((row >> bit) & 1u)) {
+        continue;
+      }
+      if (pivot[bit]) {
+        row ^= pivot[bit];
+      } else {
+        pivot[bit] = row;
+        break;
+      }
+    }
+  }
+
+  /* Reduce to RREF: clear each pivot column from every other pivot row, so a
+   * pivot bit is set only in its own row. */
+  for (int bit = 0; bit < window_bits; ++bit) {
+    if (!pivot[bit]) {
+      continue;
+    }
+    for (int other = 0; other < window_bits; ++other) {
+      if (other != bit && pivot[other] && ((pivot[other] >> bit) & 1u)) {
+        pivot[other] ^= pivot[bit];
+      }
+    }
+  }
+
+  /* Null space: one vector per free column. v_f has bit f set, and for every
+   * pivot row (pivot column p) whose reduced row has a 1 in column f, bit p
+   * set. Then row . v_f == 0 for every code-space row, so v_f is a parity
+   * check. */
+  int dimension = 0;
+  for (int free_col = 0; free_col < window_bits; ++free_col) {
+    if (pivot[free_col]) {
+      continue; /* a pivot column, not free */
+    }
+    uint32_t v = (uint32_t)1u << free_col;
+    for (int bit = 0; bit < window_bits; ++bit) {
+      if (pivot[bit] && ((pivot[bit] >> free_col) & 1u)) {
+        v |= (uint32_t)1u << bit;
+      }
+    }
+    basis[dimension++] = v;
+  }
+  return dimension;
+}
+
+/* Recover a candidate dual basis from one segment, dispatching by window width:
+ * the noise-robust Walsh-Hadamard path for narrow windows, the scalable GF(2)
+ * null-space path for wider ones. Returns the dimension, or -1 on allocation
+ * failure (WHT path only). */
+static int recover_segment(const uint8_t *stream, size_t len, int n,
+                           int window_bits, long max_windows, uint32_t *basis) {
+  if (window_bits <= DV_MAX_WINDOW_BITS) {
+    long used = 0;
+    int *spectrum =
+        dv_dual_spectrum(stream, len, n, window_bits, max_windows, &used);
+    if (!spectrum) {
+      return -1;
+    }
+    const int dimension =
+        (used >= dv_min_recovery_windows(n, window_bits))
+            ? dv_dual_basis(spectrum, used, window_bits, basis)
+            : 0;
+    free(spectrum);
+    return dimension;
+  }
+  return recover_segment_nullspace(stream, len, n, window_bits, max_windows,
+                                   basis);
 }
 
 /* -- cross-satisfaction ---------------------------------------------------- */
@@ -264,10 +386,15 @@ static double dv_cross_satisfaction(const uint8_t *stream, size_t len, int n,
                                     int dimension) {
   const int max_offset = DV_MAX_CUMULATIVE_DRIFT;
   const int offset_width = DV_OFFSET_WIDTH;
-  const long window_count = (long)((len - (size_t)window_bits) / (size_t)n) +
-                            1; /* offset=0 windows */
+  long window_count = (long)((len - (size_t)window_bits) / (size_t)n) +
+                      1; /* offset=0 windows */
   if (window_count < 1) {
     return 0.0;
+  }
+  /* Bound work on very long streams: the dual space is global, so the satisfied
+   * fraction over a long prefix represents the whole stream. */
+  if (window_count > DV_MAX_CROSS_WINDOWS) {
+    window_count = DV_MAX_CROSS_WINDOWS;
   }
 
   const double cost_match = -log(1.0 - DV_NOMINAL_P_SUB);
@@ -364,7 +491,7 @@ static const double DV_SELF_SATISFACTION_FLOOR = 0.9;
 static const double DV_SELF_SATISFACTION_GOOD = 0.97;
 
 /*
- * Recover a stream's dual basis into basis[] (capacity DV_MAX_WINDOW_BITS) and
+ * Recover a stream's dual basis into basis[] (capacity DV_HARD_WINDOW_CAP) and
  * return its dimension. Returns -1 on allocation failure, 0 if no reliable
  * basis emerged (e.g. an unstructured stream).
  *
@@ -384,6 +511,7 @@ static const double DV_SELF_SATISFACTION_GOOD = 0.97;
  */
 static int recover_basis(const uint8_t *stream, size_t len, int n,
                          int window_bits, uint32_t *basis) {
+  const long min_windows = dv_min_recovery_windows(n, window_bits);
   /* Segment window count: large enough to pin the dual space without admitting
    * spurious checks, short enough to fit inside a typical clean run. */
   long segment_windows = 4L * window_bits;
@@ -393,24 +521,19 @@ static int recover_basis(const uint8_t *stream, size_t len, int n,
   const long total_windows =
       (long)((len - (size_t)window_bits) / (size_t)n) + 1;
 
-  uint32_t candidate[DV_MAX_WINDOW_BITS];
+  uint32_t candidate[DV_HARD_WINDOW_CAP];
   int best_dimension = 0;
   double best_self_satisfaction = 0.0;
-  for (long start = 0; start + (window_bits + 1) <= total_windows;
+  for (long start = 0; start + min_windows <= total_windows;
        start += segment_windows) {
     const size_t offset = (size_t)start * (size_t)n;
-    long used = 0;
-    int *spectrum = dv_dual_spectrum(stream + offset, len - offset, n,
-                                     window_bits, segment_windows, &used);
-    if (!spectrum) {
-      return -1;
-    }
     const int dimension =
-        (used >= window_bits + 1)
-            ? dv_dual_basis(spectrum, used, window_bits, candidate)
-            : 0;
-    free(spectrum);
-    if (dimension <= 0) {
+        recover_segment(stream + offset, len - offset, n, window_bits,
+                        segment_windows, candidate);
+    if (dimension < 0) {
+      return -1; /* allocation failure */
+    }
+    if (dimension == 0) {
       continue;
     }
     const double self_satisfaction = dv_cross_satisfaction(
@@ -430,30 +553,69 @@ static int recover_basis(const uint8_t *stream, size_t len, int n,
 
 /* -- public API ------------------------------------------------------------ */
 
+/* Relation window width for a (rate 1/n, constraint length k) code, or 0 if the
+ * code is outside the range dv_compare can handle (n < 1, k < 2, k > 9, or a
+ * window wider than DV_HARD_WINDOW_CAP). Shared by dv_compare and the length
+ * helpers so they agree on what is in range. */
+static int dv_window_bits(int n, int k) {
+  if (n < 1 || k < 2 || k > 9) {
+    return 0;
+  }
+  const int window_bits = n * (k + 1);
+  return (window_bits >= 1 && window_bits <= DV_HARD_WINDOW_CAP) ? window_bits
+                                                                 : 0;
+}
+
+long dv_compare_min_len(int n, int k) {
+  const int window_bits = dv_window_bits(n, k);
+  if (window_bits == 0) {
+    return -1;
+  }
+  /* Smallest length whose window count reaches the recovery floor: window count
+   * is (len - window_bits) / n + 1, so this hits exactly
+   * dv_min_recovery_windows (one bit shorter falls below it and dv_compare is
+   * undetermined). */
+  const long min_windows = dv_min_recovery_windows(n, window_bits);
+  return (long)window_bits + (min_windows - 1) * (long)n;
+}
+
+long dv_compare_max_len(int n, int k) {
+  const int window_bits = dv_window_bits(n, k);
+  if (window_bits == 0) {
+    return -1;
+  }
+  /* Length at which the cross-satisfaction window cap is reached; beyond it the
+   * scoring consults only this prefix, so a longer sample cannot change the
+   * result and may be truncated to this length. */
+  return (long)window_bits + (DV_MAX_CROSS_WINDOWS - 1) * (long)n;
+}
+
 double dv_compare(int n, int k, uint8_t *lhs, size_t lhs_len, uint8_t *rhs,
                   size_t rhs_len) {
-  if (n < 1 || k < 2 || k > 9 || !lhs || !rhs) {
+  if (!lhs || !rhs) {
     return DV_UNDETERMINED;
   }
 
-  int window_bits = n * (k + 1);
-  if (window_bits < 1 || window_bits > DV_MAX_WINDOW_BITS) {
+  int window_bits = dv_window_bits(n, k);
+  if (window_bits == 0) {
     return DV_UNDETERMINED;
   }
   if (lhs_len < (size_t)window_bits || rhs_len < (size_t)window_bits) {
     return DV_UNDETERMINED;
   }
 
-  /* Need clearly more windows than the window width to pin down the dual space.
-   */
+  /* Need enough windows to pin down the dual space; below this floor there is
+   * too little data to recover it (anything still too thin self-validates away
+   * inside recover_basis). */
+  const long min_windows = dv_min_recovery_windows(n, window_bits);
   long windows_lhs = (long)((lhs_len - (size_t)window_bits) / (size_t)n) + 1;
   long windows_rhs = (long)((rhs_len - (size_t)window_bits) / (size_t)n) + 1;
-  if (windows_lhs < window_bits + 1 || windows_rhs < window_bits + 1) {
+  if (windows_lhs < min_windows || windows_rhs < min_windows) {
     return DV_UNDETERMINED;
   }
 
-  uint32_t basis_lhs[DV_MAX_WINDOW_BITS];
-  uint32_t basis_rhs[DV_MAX_WINDOW_BITS];
+  uint32_t basis_lhs[DV_HARD_WINDOW_CAP];
+  uint32_t basis_rhs[DV_HARD_WINDOW_CAP];
   int dimension_lhs = recover_basis(lhs, lhs_len, n, window_bits, basis_lhs);
   int dimension_rhs = recover_basis(rhs, rhs_len, n, window_bits, basis_rhs);
   if (dimension_lhs < 0 || dimension_rhs < 0) {

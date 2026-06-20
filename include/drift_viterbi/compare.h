@@ -51,14 +51,36 @@ extern "C" {
 /* clang-format on */
 
 /*
- * Probability that, for a given rate 1/n and constraint length k, the two stream
- * samples have consistent convolutional-code generator polynomials: ~1 when they
- * share the code, ~0 when they do not. Returns a negative value when the result
- * cannot be determined (bad arguments, too little data, or a code too large for
- * this version).
+ * Probability that, for a given rate 1/n and constraint length k, the two
+ * stream samples have consistent convolutional-code generator polynomials: ~1
+ * when they share the code, ~0 when they do not. Works on streams of any length
+ * that is long enough to pin the code down, and on any code whose relation
+ * window n*(k+1) fits a 32-bit word. Returns a negative value when the result
+ * cannot be determined (bad arguments, too little data, or a code with n*(k+1)
+ * > 32).
  */
 double dv_compare(int n, int k, uint8_t *lhs, size_t lhs_len, uint8_t *rhs,
                   size_t rhs_len);
+
+/* clang-format off */
+/*
+ * The range of sample lengths (in bits; one bit per byte, so this is also the
+ * byte count) that dv_compare can use for a given rate 1/n and constraint
+ * length k:
+ *
+ *   dv_compare_min_len - the fewest bits each sample must have for dv_compare to
+ *       attempt a comparison; with fewer it returns DV_UNDETERMINED for want of
+ *       data. (Necessary, not always sufficient: very degenerate data this long
+ *       may still be undetermined.)
+ *   dv_compare_max_len - the most bits dv_compare consults; beyond this, extra
+ *       bits cannot change the result, so a longer sample may be truncated.
+ *
+ * Both return a negative value when (n, k) is out of range - the same codes for
+ * which dv_compare cannot run (n < 1, k < 2, k > 9, or window n*(k+1) > 32).
+ */
+/* clang-format on */
+long dv_compare_min_len(int n, int k);
+long dv_compare_max_len(int n, int k);
 
 #ifdef __cplusplus
 }
