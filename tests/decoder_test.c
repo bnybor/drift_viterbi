@@ -408,8 +408,9 @@ static void test_stream_flips_only(void) {
   dv_code_destroy(code);
 }
 
-/* Every standard preset (the four defaults plus their two alternates each) must
- * create, report the right rate/K, and round-trip a clean stream exactly. */
+/* Every standard preset (the four defaults plus their alternates - three codes
+ * each for the rate-1/2 families, five for the wider rates) must create, report
+ * the right rate/K, and round-trip a clean stream exactly. */
 static void test_all_presets(void) {
   printf("test_all_presets\n");
   struct {
@@ -420,8 +421,10 @@ static void test_all_presets(void) {
       {DV_CODE_K3_RATE_1_2_ALT2, 2, 3}, {DV_CODE_K7_RATE_1_2, 2, 7},
       {DV_CODE_K7_RATE_1_2_ALT1, 2, 7}, {DV_CODE_K7_RATE_1_2_ALT2, 2, 7},
       {DV_CODE_K7_RATE_1_3, 3, 7},      {DV_CODE_K7_RATE_1_3_ALT1, 3, 7},
-      {DV_CODE_K7_RATE_1_3_ALT2, 3, 7}, {DV_CODE_K5_RATE_1_5, 5, 5},
+      {DV_CODE_K7_RATE_1_3_ALT2, 3, 7}, {DV_CODE_K7_RATE_1_3_ALT3, 3, 7},
+      {DV_CODE_K7_RATE_1_3_ALT4, 3, 7}, {DV_CODE_K5_RATE_1_5, 5, 5},
       {DV_CODE_K5_RATE_1_5_ALT1, 5, 5}, {DV_CODE_K5_RATE_1_5_ALT2, 5, 5},
+      {DV_CODE_K5_RATE_1_5_ALT3, 5, 5}, {DV_CODE_K5_RATE_1_5_ALT4, 5, 5},
   };
   const int np = (int)(sizeof(presets) / sizeof(presets[0]));
 
@@ -564,28 +567,34 @@ static void test_lock_probability(void) {
   dv_code_destroy(k7);
 }
 
-/* Within each (K, rate) family the default and its two alternates are picked to
- * be mutually distinguishable: each locks onto its own stream but not onto a
- * sibling's. (Across families - different K or rate - this is NOT guaranteed;
- * see the comment on dv_standard_code.) */
+/* Within each (K, rate) family the default and its alternates are picked to be
+ * mutually distinguishable: each locks onto its own stream but not onto a
+ * sibling's. Families ship as many codes as their generator space supports a
+ * mutually-distinguishable set of - three for the rate-1/2 families, five for
+ * the wider rates - so each carries its own `count`. (Across families - a
+ * different K or rate - distinguishability is NOT guaranteed; see the comment on
+ * dv_standard_code.) */
 static void test_cross_lock_within_family(void) {
   printf("test_cross_lock_within_family\n");
   struct {
     const char *name;
-    dv_standard_code v[3];
+    int count;
+    dv_standard_code v[5];
   } fam[] = {
       {"K3_R1_2",
-       {DV_CODE_K3_RATE_1_2, DV_CODE_K3_RATE_1_2_ALT1,
-        DV_CODE_K3_RATE_1_2_ALT2}},
+       3,
+       {DV_CODE_K3_RATE_1_2, DV_CODE_K3_RATE_1_2_ALT1, DV_CODE_K3_RATE_1_2_ALT2}},
       {"K7_R1_2",
-       {DV_CODE_K7_RATE_1_2, DV_CODE_K7_RATE_1_2_ALT1,
-        DV_CODE_K7_RATE_1_2_ALT2}},
+       3,
+       {DV_CODE_K7_RATE_1_2, DV_CODE_K7_RATE_1_2_ALT1, DV_CODE_K7_RATE_1_2_ALT2}},
       {"K7_R1_3",
-       {DV_CODE_K7_RATE_1_3, DV_CODE_K7_RATE_1_3_ALT1,
-        DV_CODE_K7_RATE_1_3_ALT2}},
+       5,
+       {DV_CODE_K7_RATE_1_3, DV_CODE_K7_RATE_1_3_ALT1, DV_CODE_K7_RATE_1_3_ALT2,
+        DV_CODE_K7_RATE_1_3_ALT3, DV_CODE_K7_RATE_1_3_ALT4}},
       {"K5_R1_5",
-       {DV_CODE_K5_RATE_1_5, DV_CODE_K5_RATE_1_5_ALT1,
-        DV_CODE_K5_RATE_1_5_ALT2}},
+       5,
+       {DV_CODE_K5_RATE_1_5, DV_CODE_K5_RATE_1_5_ALT1, DV_CODE_K5_RATE_1_5_ALT2,
+        DV_CODE_K5_RATE_1_5_ALT3, DV_CODE_K5_RATE_1_5_ALT4}},
   };
   const int nf = (int)(sizeof(fam) / sizeof(fam[0]));
 
@@ -594,18 +603,28 @@ static void test_cross_lock_within_family(void) {
   uint8_t msg[600];
   for (int i = 0; i < 600; ++i) msg[i] = (uint8_t)((i * 7 + 3) & 1);
 
-  /* Flatten family x i x j into one index: every (encode-with-i, decode-with-j)
-   * lock measurement is independent, so the 36 trials fan out across cores.
-   * min_self / max_cross combine with OpenMP min/max reductions (and reduce to
-   * the plain serial updates when OpenMP is absent). */
+  /* Flatten every (family, encode-with-i, decode-with-j) triple into one index
+   * list - families have different counts, so we enumerate the triples up front
+   * rather than decompose a flat index - and fan the independent lock
+   * measurements out across cores. min_self / max_cross combine with OpenMP
+   * min/max reductions (and reduce to the plain serial updates when OpenMP is
+   * absent). */
+  int tf[4 * 5 * 5], ti[4 * 5 * 5], tj[4 * 5 * 5];
+  int n_trials = 0;
+  for (int f = 0; f < nf; ++f)
+    for (int i = 0; i < fam[f].count; ++i)
+      for (int j = 0; j < fam[f].count; ++j) {
+        tf[n_trials] = f;
+        ti[n_trials] = i;
+        tj[n_trials] = j;
+        ++n_trials;
+      }
+
   double max_cross = 0.0, min_self = 1.0;
-  const int n_trials = nf * 3 * 3;
 #pragma omp parallel for schedule(dynamic) reduction(max : max_cross) \
     reduction(min : min_self)
   for (int idx = 0; idx < n_trials; ++idx) {
-    const int f = idx / 9;
-    const int i = (idx / 3) % 3;
-    const int j = idx % 3;
+    const int f = tf[idx], i = ti[idx], j = tj[idx];
     dv_code *ci = dv_code_create_standard(fam[f].v[i]);
     dv_code *cj = dv_code_create_standard(fam[f].v[j]);
     if (!ci || !cj) {

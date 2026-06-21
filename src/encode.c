@@ -94,8 +94,12 @@ dv_code *dv_code_create(int K, const unsigned int *generators,
 
 dv_code *dv_code_create_standard(dv_standard_code which) {
   switch (which) {
+    /* These generator sets and the d_free values in encode.h are produced by
+     * bench/dv_codesearch, which selects, per family, the codes that are
+     * mutually distinguishable under the decoder's lock metric (rate-1/2 tops
+     * out at three such codes; the wider rates reach five). */
     case DV_CODE_K3_RATE_1_2: {
-      static const unsigned int generators[] = {007, 005};
+      static const unsigned int generators[] = {005, 007};
       return dv_code_create(3, generators, 2);
     }
     case DV_CODE_K3_RATE_1_2_ALT1: {
@@ -103,7 +107,7 @@ dv_code *dv_code_create_standard(dv_standard_code which) {
       return dv_code_create(3, generators, 2);
     }
     case DV_CODE_K3_RATE_1_2_ALT2: {
-      static const unsigned int generators[] = {006, 007};
+      static const unsigned int generators[] = {003, 007};
       return dv_code_create(3, generators, 2);
     }
     case DV_CODE_K7_RATE_1_2: {
@@ -111,35 +115,51 @@ dv_code *dv_code_create_standard(dv_standard_code which) {
       return dv_code_create(7, generators, 2);
     }
     case DV_CODE_K7_RATE_1_2_ALT1: {
-      static const unsigned int generators[] = {0112, 0167};
+      static const unsigned int generators[] = {0043, 0175};
       return dv_code_create(7, generators, 2);
     }
     case DV_CODE_K7_RATE_1_2_ALT2: {
-      static const unsigned int generators[] = {0067, 0115};
+      static const unsigned int generators[] = {0107, 0156};
       return dv_code_create(7, generators, 2);
     }
     case DV_CODE_K7_RATE_1_3: {
-      static const unsigned int generators[] = {0171, 0165, 0133};
+      static const unsigned int generators[] = {0113, 0135, 0157};
       return dv_code_create(7, generators, 3);
     }
     case DV_CODE_K7_RATE_1_3_ALT1: {
-      static const unsigned int generators[] = {0135, 0151, 0173};
+      static const unsigned int generators[] = {0112, 0153, 0157};
       return dv_code_create(7, generators, 3);
     }
     case DV_CODE_K7_RATE_1_3_ALT2: {
-      static const unsigned int generators[] = {0123, 0165, 0173};
+      static const unsigned int generators[] = {0037, 0135, 0153};
+      return dv_code_create(7, generators, 3);
+    }
+    case DV_CODE_K7_RATE_1_3_ALT3: {
+      static const unsigned int generators[] = {0012, 0145, 0177};
+      return dv_code_create(7, generators, 3);
+    }
+    case DV_CODE_K7_RATE_1_3_ALT4: {
+      static const unsigned int generators[] = {0042, 0133, 0172};
       return dv_code_create(7, generators, 3);
     }
     case DV_CODE_K5_RATE_1_5: {
-      static const unsigned int generators[] = {037, 033, 025, 027, 035};
+      static const unsigned int generators[] = {025, 027, 033, 035, 037};
       return dv_code_create(5, generators, 5);
     }
     case DV_CODE_K5_RATE_1_5_ALT1: {
-      static const unsigned int generators[] = {023, 025, 033, 035, 037};
+      static const unsigned int generators[] = {007, 017, 025, 027, 035};
       return dv_code_create(5, generators, 5);
     }
     case DV_CODE_K5_RATE_1_5_ALT2: {
-      static const unsigned int generators[] = {025, 027, 031, 033, 037};
+      static const unsigned int generators[] = {011, 032, 033, 035, 037};
+      return dv_code_create(5, generators, 5);
+    }
+    case DV_CODE_K5_RATE_1_5_ALT3: {
+      static const unsigned int generators[] = {013, 021, 023, 033, 037};
+      return dv_code_create(5, generators, 5);
+    }
+    case DV_CODE_K5_RATE_1_5_ALT4: {
+      static const unsigned int generators[] = {013, 024, 032, 033, 037};
       return dv_code_create(5, generators, 5);
     }
   }

@@ -148,14 +148,27 @@ static void test_structured_vs_random(uint64_t seed) {
  * the WHT cap and exercise dv_compare's null-space recovery path. */
 static void test_lock_matches_compare(uint64_t seed) {
   printf("test_lock_matches_compare\n");
-  const dv_standard_code family[][3] = {
-      {DV_CODE_K3_RATE_1_2, DV_CODE_K3_RATE_1_2_ALT1, DV_CODE_K3_RATE_1_2_ALT2},
-      {DV_CODE_K7_RATE_1_2, DV_CODE_K7_RATE_1_2_ALT1, DV_CODE_K7_RATE_1_2_ALT2},
-      {DV_CODE_K7_RATE_1_3, DV_CODE_K7_RATE_1_3_ALT1, DV_CODE_K7_RATE_1_3_ALT2},
-      {DV_CODE_K5_RATE_1_5, DV_CODE_K5_RATE_1_5_ALT1, DV_CODE_K5_RATE_1_5_ALT2},
+  struct {
+    const char *name;
+    int count;
+    dv_standard_code v[5];
+  } family[] = {
+      {"K3_R1_2",
+       3,
+       {DV_CODE_K3_RATE_1_2, DV_CODE_K3_RATE_1_2_ALT1, DV_CODE_K3_RATE_1_2_ALT2}},
+      {"K7_R1_2",
+       3,
+       {DV_CODE_K7_RATE_1_2, DV_CODE_K7_RATE_1_2_ALT1, DV_CODE_K7_RATE_1_2_ALT2}},
+      {"K7_R1_3",
+       5,
+       {DV_CODE_K7_RATE_1_3, DV_CODE_K7_RATE_1_3_ALT1, DV_CODE_K7_RATE_1_3_ALT2,
+        DV_CODE_K7_RATE_1_3_ALT3, DV_CODE_K7_RATE_1_3_ALT4}},
+      {"K5_R1_5",
+       5,
+       {DV_CODE_K5_RATE_1_5, DV_CODE_K5_RATE_1_5_ALT1, DV_CODE_K5_RATE_1_5_ALT2,
+        DV_CODE_K5_RATE_1_5_ALT3, DV_CODE_K5_RATE_1_5_ALT4}},
   };
-  const char *family_name[] = {"K3_R1_2", "K7_R1_2", "K7_R1_3", "K5_R1_5"};
-  const int n_families = 4;
+  const int n_families = (int)(sizeof(family) / sizeof(family[0]));
   const int info_bits = 1500;
 
   /* Score > this reads as "same code". Both methods' self/sibling values sit
@@ -164,16 +177,24 @@ static void test_lock_matches_compare(uint64_t seed) {
   const double LOCK_SAME = 0.8;
   const double COMPARE_SAME = 0.5;
 
-  /* Flatten the family x i x j nest into one index so the 36 independent
-   * (decode + compare) trials - the suite's dominant cost - fan out across
+  /* Flatten every (family, i, j) triple into one index list - families have
+   * different counts, so enumerate the triples up front - and fan the
+   * independent (decode + compare) trials, the suite's dominant cost, out across
    * cores. Every trial allocates its own buffers, so there is nothing shared to
    * race on; check() serialises only the PASS/FAIL bookkeeping. */
-  const int n_trials = n_families * 3 * 3;
+  int tf[4 * 5 * 5], ti[4 * 5 * 5], tj[4 * 5 * 5];
+  int n_trials = 0;
+  for (int f = 0; f < n_families; ++f)
+    for (int i = 0; i < family[f].count; ++i)
+      for (int j = 0; j < family[f].count; ++j) {
+        tf[n_trials] = f;
+        ti[n_trials] = i;
+        tj[n_trials] = j;
+        ++n_trials;
+      }
 #pragma omp parallel for schedule(dynamic)
   for (int idx = 0; idx < n_trials; ++idx) {
-    const int f = idx / 9;
-    const int i = (idx / 3) % 3;
-    const int j = idx % 3;
+    const int f = tf[idx], i = ti[idx], j = tj[idx];
 
     uint8_t *msg_a = malloc((size_t)info_bits);
     uint8_t *msg_b = malloc((size_t)info_bits);
@@ -185,8 +206,8 @@ static void test_lock_matches_compare(uint64_t seed) {
     rand_bits(msg_b, info_bits, &rng);
 
     /* lock: decode code i's stream with code j's decoder. */
-    dv_code *enc = dv_code_create_standard(family[f][i]);
-    dv_code *dec = dv_code_create_standard(family[f][j]);
+    dv_code *enc = dv_code_create_standard(family[f].v[i]);
+    dv_code *dec = dv_code_create_standard(family[f].v[j]);
     double lock =
         decoder_lock_mean(enc, dec, msg_a, info_bits, 8 * dv_code_k(dec));
     dv_code_destroy(enc);
@@ -194,8 +215,8 @@ static void test_lock_matches_compare(uint64_t seed) {
 
     /* compare: independent streams from code i and code j. */
     int n, k, n2, k2;
-    size_t len_a = encode(family[f][i], msg_a, info_bits, coded_a, &n, &k);
-    size_t len_b = encode(family[f][j], msg_b, info_bits, coded_b, &n2, &k2);
+    size_t len_a = encode(family[f].v[i], msg_a, info_bits, coded_a, &n, &k);
+    size_t len_b = encode(family[f].v[j], msg_b, info_bits, coded_b, &n2, &k2);
     double compare = dv_compare(n, k, coded_a, len_a, coded_b, len_b);
 
     int truth_same = (i == j);
@@ -205,8 +226,7 @@ static void test_lock_matches_compare(uint64_t seed) {
              (lock_same == compare_same);
     char label[80];
     snprintf(label, sizeof label, "%s [%d->%d] lock=%.3f compare=%.3f truth=%s",
-             family_name[f], i, j, lock, compare,
-             truth_same ? "same" : "diff");
+             family[f].name, i, j, lock, compare, truth_same ? "same" : "diff");
     check(label, ok);
 
     free(msg_a);

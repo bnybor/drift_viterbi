@@ -88,25 +88,31 @@ const char *drift_viterbi_version(void);
 typedef struct dv_code dv_code;
 
 /* Ready-made codes. More output per input bit corrects more errors but uses
- * more bandwidth; when unsure, pick DV_CODE_K7_RATE_1_2. Each rate/K comes in
- * three polynomial sets - the default plus two alternates picked to be as far
- * apart as possible, so a decoder for one will not lock onto another's stream
- * (see dv_stream_decode's lock_probability). The alternates trade a little free
- * distance for that separation. The trailing comment is each code's free
- * distance: higher corrects more. */
+ * more bandwidth; when unsure, pick DV_CODE_K7_RATE_1_2. Each rate/K family is a
+ * default plus a few alternates, all picked to be mutually distinguishable: a
+ * decoder (or dv_compare) for one will not lock onto another's stream (see
+ * dv_stream_decode's lock_probability). How many alternates a family has depends
+ * on how many distinguishable codes its generator space actually holds - the
+ * rate-1/2 families support three apiece, the rate-1/3 and rate-1/5 families
+ * five. The alternates trade a little free distance for that separation. The
+ * trailing comment is each code's free distance: higher corrects more. */
 typedef enum {
   DV_CODE_K3_RATE_1_2,      /* 2x output size; d_free 5 (good default for K=3) */
   DV_CODE_K3_RATE_1_2_ALT1, /* 2x output size; d_free 4                        */
   DV_CODE_K3_RATE_1_2_ALT2, /* 2x output size; d_free 4                        */
   DV_CODE_K7_RATE_1_2,      /* 2x output size; d_free 10 (good default)        */
-  DV_CODE_K7_RATE_1_2_ALT1, /* 2x output size; d_free 9                        */
-  DV_CODE_K7_RATE_1_2_ALT2, /* 2x output size; d_free 9                        */
+  DV_CODE_K7_RATE_1_2_ALT1, /* 2x output size; d_free 8                        */
+  DV_CODE_K7_RATE_1_2_ALT2, /* 2x output size; d_free 8                        */
   DV_CODE_K7_RATE_1_3,      /* 3x output size; d_free 15                       */
-  DV_CODE_K7_RATE_1_3_ALT1, /* 3x output size; d_free 15                       */
-  DV_CODE_K7_RATE_1_3_ALT2, /* 3x output size; d_free 15                       */
+  DV_CODE_K7_RATE_1_3_ALT1, /* 3x output size; d_free 14                       */
+  DV_CODE_K7_RATE_1_3_ALT2, /* 3x output size; d_free 13                       */
+  DV_CODE_K7_RATE_1_3_ALT3, /* 3x output size; d_free 12                       */
+  DV_CODE_K7_RATE_1_3_ALT4, /* 3x output size; d_free 12                       */
   DV_CODE_K5_RATE_1_5,      /* 5x output size; d_free 20 (strongest)           */
-  DV_CODE_K5_RATE_1_5_ALT1, /* 5x output size; d_free 19                       */
-  DV_CODE_K5_RATE_1_5_ALT2  /* 5x output size; d_free 19                       */
+  DV_CODE_K5_RATE_1_5_ALT1, /* 5x output size; d_free 18                       */
+  DV_CODE_K5_RATE_1_5_ALT2, /* 5x output size; d_free 18                       */
+  DV_CODE_K5_RATE_1_5_ALT3, /* 5x output size; d_free 17                       */
+  DV_CODE_K5_RATE_1_5_ALT4  /* 5x output size; d_free 17                       */
 } dv_standard_code;
 
 /* Make one of the ready-made codes above. Returns NULL on a bad argument or out
