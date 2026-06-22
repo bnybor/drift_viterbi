@@ -24,8 +24,8 @@
  */
 /* clang-format on */
 
-#ifndef INCLUDE_DRIFT_VITERBI_MULTI_H_
-#define INCLUDE_DRIFT_VITERBI_MULTI_H_
+#ifndef INCLUDE_DRIFT_VITERBI_MULTI_DECODE_H_
+#define INCLUDE_DRIFT_VITERBI_MULTI_DECODE_H_
 
 #include <drift_viterbi/decode.h>
 #include <stddef.h>
@@ -117,4 +117,4 @@ int dv_multi_decode_flush(dv_multi_decoder *d, uint8_t *out, int max_out);
 }
 #endif
 
-#endif /* INCLUDE_DRIFT_VITERBI_MULTI_H_ */
+#endif /* INCLUDE_DRIFT_VITERBI_MULTI_DECODE_H_ */

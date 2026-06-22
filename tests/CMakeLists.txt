@@ -3,7 +3,7 @@
 # the `#pragma omp` lines are ignored and the tests simply run single-threaded.
 find_package(OpenMP COMPONENTS C QUIET)
 
-foreach(t decoder_test compare_test detect_test multi_test)
+foreach(t decoder_test compare_test detect_test multi_test multi_encode_test)
     add_executable(${t} ${t}.c)
     target_link_libraries(${t} PRIVATE drift_viterbi::drift_viterbi)
     if(OpenMP_C_FOUND)

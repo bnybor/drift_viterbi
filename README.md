@@ -116,6 +116,36 @@ how confident the combiner must be — in the best code's absolute lock probabil
 and in the winning bit value's lead over the other as a share of the total
 likelihood weight — to commit a bit rather than abstain (defaults 0.6 and 0.2).
 
+## Encoding with a selectable code
+
+The sender's mirror of the multi-decoder. Hold a family of codes that share a
+rate and constraint length, and on each call encode with the one you pick by
+index. The encoder keeps a single state shared across the codes — which is well
+defined because a convolutional encoder's state depends only on the constraint
+length and the input bits, not the generator polynomials — so you can even switch
+codes partway through one message and the stream stays continuous.
+
+```c
+const dv_code *codes[] = { code_a, code_b, code_c };   /* same rate and K */
+
+dv_multi_encoder *e = dv_multi_encode_create(&(dv_multi_encode_params){
+    .codes = codes, .codes_len = 3,
+});
+
+uint8_t coded[OUT];
+int len  = dv_multi_encode(e, idx, bits, n_bits, coded, OUT);  /* emit codes[idx] */
+/* ... more chunks, optionally with a different idx ... */
+len += dv_multi_encode_flush(e, idx, coded + len, OUT - len);  /* finish the stream */
+
+dv_multi_encode_destroy(e);   /* you still own the codes */
+```
+
+`dv_multi_encoder` is an opaque handle. The codes must share a rate (`dv_code_n`)
+and a constraint length (`dv_code_k`) and must outlive the encoder, which borrows
+them (it copies the array, frees neither). Each call writes `n_bits * dv_code_n`
+bits for the selected code; `max_out` caps the write. Feed the resulting stream to
+a `dv_multi_decoder` over the same family to decode it without knowing the index.
+
 ## Build
 
 ```sh

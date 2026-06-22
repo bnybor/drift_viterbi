@@ -37,6 +37,7 @@
 #include <drift_viterbi/compare.h>
 #include <drift_viterbi/decode.h>
 #include <drift_viterbi/encode.h>
-#include <drift_viterbi/multi.h>
+#include <drift_viterbi/multi_decode.h>
+#include <drift_viterbi/multi_encode.h>
 
 #endif /* DRIFT_VITERBI_DRIFT_VITERBI_H */

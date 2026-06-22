@@ -37,7 +37,7 @@
  * (see multi_run).
  */
 
-#include <drift_viterbi/multi.h>
+#include <drift_viterbi/multi_decode.h>
 
 #include <drift_viterbi/encode.h>
 #include <drift_viterbi/stdlib.h>
