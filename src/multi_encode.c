@@ -66,11 +66,19 @@ dv_multi_encoder *dv_multi_encode_create(const dv_multi_encode_params *params) {
       return NULL;
     }
     for (size_t j = 0; j < params->codes_len; ++j) {
+      /* Reject a NULL entry outright. The rate/length comparison below cannot
+       * catch a NULL at index 0: dv_code_n/k(NULL) == -1, so codes[0] == NULL
+       * compares equal to itself (-1 == -1) and an all-NULL set would slip
+       * through. (The decode-side gate is spared this because dv_multi_create
+       * runs dv_decode_ctx_init on codes[0] first, which rejects a NULL code.) */
+      if (!params->codes[j]) {
+        dv_multi_encode_destroy(e);
+        return NULL;
+      }
       /* One shared state drives every code, so all codes must agree on the
        * constraint length (dv_code_k) it steps and the rate (dv_code_n) each
        * step emits; otherwise the chosen code's stream would not be coherent
-       * with the others'. A NULL slot fails here too: dv_code_n(NULL) == -1 !=
-       * codes[0]'s rate. Mirrors dv_multi_create's gate. */
+       * with the others'. Mirrors dv_multi_create's gate. */
       if (dv_code_n(params->codes[j]) != dv_code_n(params->codes[0]) ||
           dv_code_k(params->codes[j]) != dv_code_k(params->codes[0])) {
         dv_multi_encode_destroy(e);
@@ -104,7 +112,13 @@ int dv_multi_encode(dv_multi_encoder *e, int idx, const uint8_t *bits, int n_bit
       (n_bits > 0 && !bits)) {
     return DV_ERR_ARG;
   }
-  if (n_bits * dv_code_n(e->codes[idx]) > max_out) {
+  /* dv_code_n >= 1 for any valid code (num_generators >= 1), and codes[idx] is
+   * non-NULL after the create-time NULL gate, so this division is exactly
+   * equivalent to n_bits * n > max_out but cannot overflow (n_bits * n would be
+   * signed-overflow UB for large n_bits, wrapping negative and silently passing
+   * the bound). */
+  const int n = dv_code_n(e->codes[idx]);
+  if (n_bits > max_out / n) {
     return DV_ERR_ARG;
   }
   return dv_code_encode(e->codes[idx], bits, n_bits, &e->state, out);
