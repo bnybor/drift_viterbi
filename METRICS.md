@@ -73,7 +73,7 @@ gaps widen: `K5_R1_5` stays under 0.005 while `K7_R1_2` reaches ~0.14.
 
 ![mean info bits between edits vs flip rate](plots/runlen_vs_flip_per_info_bit.png)
 
-Mean run length between edits, in info bits (linear, adaptive y-cap ~1500). Each
+Mean run length between edits, in info bits (linear, adaptive y-cap ~1320). Each
 code's run length is effectively unbounded (off the top) below its threshold,
 then drops off a cliff: `K3_R1_2` near 2.5%, `K7_R1_2` near 5%, `K7_R1_3` near
 10%, `K5_R1_5` near 15%. This reads directly as "how long a clean run you can
@@ -81,7 +81,7 @@ expect" at a given flip rate.
 
 ![mean coded bits between edits vs flip rate](plots/runlen_vs_flip_per_coded_bit.png)
 
-The same in coded bits (`n`× larger, cap ~4750); identical cliff positions. Use
+The same in coded bits (`n`× larger, cap ~3760); identical cliff positions. Use
 this view when you care about bits on the wire rather than payload delivered.
 
 ### Insert channel (spurious bits)
@@ -101,13 +101,13 @@ whole range, `K7_R1_3` ~0.02, and the rate-1/2 codes reach ~0.08–0.12.
 
 ![mean info bits between edits vs insert rate](plots/runlen_vs_insert_per_info_bit.png)
 
-Run length in info bits (cap ~260). `K5_R1_5` sustains ~100–250 info bits per
+Run length in info bits (cap ~190). `K5_R1_5` sustains ~100–190 info bits per
 edit across most of the range (spiky, since edits are rare), `K7_R1_3` ~20–50,
 while the rate-1/2 codes collapse below ~10 once they lose lock past ~7%.
 
 ![mean coded bits between edits vs insert rate](plots/runlen_vs_insert_per_coded_bit.png)
 
-The same in coded bits (cap ~820): `K5_R1_5` clears many hundreds of coded bits
+The same in coded bits (cap ~710): `K5_R1_5` clears many hundreds of coded bits
 per edit, while the rate-1/2 codes manage only a handful past their knee.
 
 ### Delete channel (dropped bits)
@@ -127,13 +127,13 @@ and the rate-1/2 codes ~0.13–0.15 at 20%.
 
 ![mean info bits between edits vs delete rate](plots/runlen_vs_delete_per_info_bit.png)
 
-Run length in info bits (cap ~1120). `K5_R1_5` holds an effectively unbounded run
+Run length in info bits (cap ~1020). `K5_R1_5` holds an effectively unbounded run
 out to ~3% deletions and stays the highest throughout; the rate-1/2 codes cliff
 earliest. Tails settle at tens of info bits per edit.
 
 ![mean coded bits between edits vs delete rate](plots/runlen_vs_delete_per_coded_bit.png)
 
-The same in coded bits (cap ~2940), scaled by rate; same ordering.
+The same in coded bits (cap ~2450), scaled by rate; same ordering.
 
 ### Erase channel (bits marked lost)
 
@@ -156,11 +156,11 @@ Per coded bit, the same knees with curves scaled by rate: `K5_R1_5` stays under
 
 ![mean info bits between edits vs erase rate](plots/runlen_vs_erase_per_info_bit.png)
 
-Mean run length between edits, info bits (cap ~760). Each code holds an
+Mean run length between edits, info bits (cap ~1280). Each code holds an
 effectively unbounded run until its capacity limit, then drops off a cliff; the
 cliffs march rightward with redundancy (rate-1/2 near 45%, `K7_R1_3` near 60%,
 `K5_R1_5` near 75%).
 
 ![mean coded bits between edits vs erase rate](plots/runlen_vs_erase_per_coded_bit.png)
 
-The same in coded bits (cap ~1970); identical cliff positions, scaled by rate.
+The same in coded bits (cap ~3760); identical cliff positions, scaled by rate.
