@@ -28,6 +28,7 @@ void *dv_memset(void *dest, int value, size_t n);
 
 int dv_abs(int value);
 double dv_log(double x);
+double dv_exp(double x);
 
 #ifdef __cplusplus
 }

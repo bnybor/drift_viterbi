@@ -48,20 +48,23 @@ typedef struct dv_multi_decoder dv_multi_decoder;
  *
  *   codes      : array of `codes_len` codes to decode against in parallel over a
  *                single shared received buffer and cadence. Required. They must
- *                share a rate (same dv_code_n) - one decoded bit corresponds to
- *                one message bit across all of them, and they advance in lockstep
- *                under one shared re-anchor - and otherwise typically differ only
- *                in their generator polynomials. Each code must outlive the
- *                multi-decoder.
+ *                share a rate (same dv_code_n) AND a constraint length (same
+ *                dv_code_k) - one decoded bit corresponds to one message bit
+ *                across all of them, and they advance in lockstep under one
+ *                shared re-anchor over one trellis geometry - and otherwise
+ *                typically differ only in their generator polynomials. A set
+ *                that violates this is rejected (dv_multi_create returns NULL).
+ *                Each code must outlive the multi-decoder.
  *   codes_len  : how many codes `codes` points to.
  *   stream     : decoder settings (decision_depth, drift, channel probabilities;
  *                see dv_stream_params) shared by every code's decoder. Required.
- *   lock_floor : the lock probability (see dv_stream_decode) a decoder must
- *                reach before its bit is committed; below it the bit is
- *                DV_ERASURE. Default 0.6.
- *   lock_margin: how far the best decoder's lock probability must exceed the
- *                next best for it to win the bit; too close and the bit is
- *                DV_ERASURE. Default 0.2.
+ *   lock_floor : the lock probability (see dv_stream_decode) the best-fitting
+ *                code must reach for any bit to be committed; if none does,
+ *                nothing is locked and the bit is DV_ERASURE. Default 0.6.
+ *   lock_margin: how decisively the codes' likelihood-weighted vote must favour
+ *                one bit value over the other - as a share of the total weight,
+ *                so 0 commits on any majority and 1 never commits - for that bit
+ *                to be emitted rather than DV_ERASURE. Default 0.2.
  */
 /* clang-format on */
 typedef struct {
@@ -86,15 +89,16 @@ void dv_multi_destroy(dv_multi_decoder *m);
 
 /*
  * Decode a received bit stream with all of the decoders in the multi struct at
- * once, and for each output-bit position keep the bit from whichever decoder is
- * most confidently locked (highest lock probability, see dv_stream_decode). A
- * decoder only wins when it is clearly the most likely; when none is, that bit
- * is DV_ERASURE.
+ * once. For each output-bit position the decoders' traced bits are combined by
+ * likelihood weight - each code's weight falls off with how poorly it fits the
+ * stream - and the heavier bit value is emitted when it leads the other by
+ * lock_margin of the total weight. When no code is locked (none reaches
+ * lock_floor) or the weighted vote is too close, that bit is DV_ERASURE.
  *
  * `in`/`n_in`, `out`/`max_out`, and the return value follow dv_stream_decode.
  * `locked_decoder`, which may be NULL, is written alongside `out` (same length):
- * each entry is the index of the decoder chosen for that bit, or -1 where the
- * bit was erased.
+ * each entry is the index of the likeliest code (lowest-cost) at that position,
+ * or -1 where the bit was erased.
  */
 int dv_multi_decode(dv_multi_decoder *d, const uint8_t *in, int n_in,
                     uint8_t *out, int *locked_decoder, int max_out);

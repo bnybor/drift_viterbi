@@ -26,13 +26,15 @@
 
 /*
  * Multi-decoder: decode one received stream against several candidate codes at
- * once and, per output bit, keep the bit from whichever code is most confidently
- * locked. Rather than wrap N independent dv_stream_decoders, it drives the
- * decoder internals directly (decode_internal.h): one shared dv_decode_ctx (the
- * single received buffer + cadence) and one dv_trellis per code, all advanced in
- * lockstep by dv_decode_step with one shared re-anchor. Because the cadence is
- * shared, every trellis decides the same step at the same time, so the per-bit
- * merge is a direct lock comparison - no output realignment needed.
+ * once and, per output bit, soft-combine their decisions weighted by how well
+ * each code fits the stream. Rather than wrap N independent dv_stream_decoders,
+ * it drives the decoder internals directly (decode_internal.h): one shared
+ * dv_decode_ctx (the single received buffer + cadence) and one dv_trellis per
+ * code, all advanced in lockstep by dv_decode_step with one shared re-anchor.
+ * Because the cadence is shared, every trellis decides the same step at the same
+ * time, so the per-bit merge needs no output realignment - the codes' bits for a
+ * given step are directly commensurable and are combined by likelihood weight
+ * (see multi_run).
  */
 
 #include <drift_viterbi/multi.h>
@@ -42,9 +44,10 @@
 
 #include "decode_internal.h"
 
-/* Defaults for the selection thresholds when params (or a field) is left 0: a
- * code wins a bit only when its lock probability clears this floor and beats the
- * next-best code's by this margin; otherwise the bit is erased. */
+/* Defaults for the selection thresholds when params (or a field) is left 0: at
+ * least one code's lock probability must clear this floor for any bit to commit,
+ * and the winning bit value must lead the other by this share of the total
+ * likelihood weight; otherwise the bit is erased. */
 static const double DV_MULTI_LOCK_FLOOR_DEFAULT = 0.6;
 static const double DV_MULTI_LOCK_MARGIN_DEFAULT = 0.2;
 
@@ -89,6 +92,17 @@ dv_multi_decoder *dv_multi_create(const dv_multi_params *params) {
       return NULL;
     }
     for (size_t j = 0; j < params->codes_len; ++j) {
+      /* Every trellis is sized from the shared ctx (taken from codes[0]) yet
+       * forward_pass walks each code's own next_state/output tables over
+       * ctx->num_states. Codes that differ in rate (dv_code_n) or constraint
+       * length (dv_code_k, hence n_states) would index those tables out of
+       * bounds, so reject the set rather than corrupt memory. A NULL slot fails
+       * here too: dv_code_n(NULL) == -1 != codes[0]'s rate. */
+      if (dv_code_n(params->codes[j]) != dv_code_n(params->codes[0]) ||
+          dv_code_k(params->codes[j]) != dv_code_k(params->codes[0])) {
+        dv_multi_destroy(m);
+        return NULL;
+      }
       if (dv_trellis_init(&m->trellises[j], &m->ctx, params->codes[j]) < 0) {
         dv_multi_destroy(m);
         return NULL;
@@ -121,9 +135,10 @@ static int multi_args_ok(const dv_multi_decoder *d, const uint8_t *in, int n_in,
 }
 
 /* Step the fused trellises over the buffered input, emitting one merged bit per
- * decided step: the bit of the most confidently locked code, or DV_ERASURE when
- * none clears the floor / beats the next best by the margin. `draining` relaxes
- * the look-ahead for end-of-stream. Shared by decode and flush. */
+ * decided step: the likelihood-weighted soft combination of the codes' traced
+ * bits (see the loop body), or DV_ERASURE when nothing is locked or the combined
+ * vote is too close to call. `draining` relaxes the look-ahead for end-of-stream.
+ * Shared by decode and flush. */
 static int multi_run(dv_multi_decoder *d, uint8_t *out, int *locked_decoder,
                      int max_out, int draining) {
   dv_decode_ctx *ctx = &d->ctx;
@@ -144,22 +159,52 @@ static int multi_run(dv_multi_decoder *d, uint8_t *out, int *locked_decoder,
       if (output_count >= max_out) {
         break;
       }
-      double best = -1.0, second = -1.0;
+      /* Likelihood-weighted soft combine across the codes. Each trellis's
+       * smoothed_cost is the best path's per-step negative-log-likelihood under
+       * that code, so w_j = exp(-(cost_j - min_cost)) is code j's likelihood
+       * relative to the best-fitting one: a code that does not fit (much higher
+       * cost) gets vanishing weight automatically, with no hard cutoff. Every
+       * code then casts its own traced bit and we accumulate the weight behind
+       * each bit value; the heavier value wins when it leads by >= lock_margin
+       * of the total weight, else the bit is genuinely ambiguous and erased.
+       *
+       * One code is still gated absolutely: unless the best-locked code clears
+       * lock_floor, nothing is locked (e.g. noise, or between codes) and the bit
+       * is erased regardless of how the weights split. The reported winner is
+       * the single likeliest code (lowest cost), or -1 when erased. */
+      double min_cost = d->trellises[0].smoothed_cost;
       int best_idx = 0;
-      for (size_t j = 0; j < d->n; ++j) {
-        double lk = dv_trellis_lock(ctx, &d->trellises[j]);
-        if (lk > best) {
-          second = best;
-          best = lk;
+      for (size_t j = 1; j < d->n; ++j) {
+        if (d->trellises[j].smoothed_cost < min_cost) {
+          min_cost = d->trellises[j].smoothed_cost;
           best_idx = (int)j;
-        } else if (lk > second) {
-          second = lk;
         }
       }
-      if (best >= d->lock_floor && best - second >= d->lock_margin) {
-        int frontier = dv_trellis_frontier(ctx, &d->trellises[best_idx]);
-        out[output_count] =
-            dv_trellis_trace(ctx, &d->trellises[best_idx], frontier, ctx->decided);
+      const double best_lock = dv_trellis_lock(ctx, &d->trellises[best_idx]);
+
+      int decided_bit = -1; /* 0/1 once chosen; stays -1 to erase */
+      if (best_lock >= d->lock_floor) {
+        double weight_total = 0.0, weight_ones = 0.0;
+        for (size_t j = 0; j < d->n; ++j) {
+          const double w = dv_exp(min_cost - d->trellises[j].smoothed_cost);
+          weight_total += w;
+          const int frontier = dv_trellis_frontier(ctx, &d->trellises[j]);
+          if (dv_trellis_trace(ctx, &d->trellises[j], frontier, ctx->decided)) {
+            weight_ones += w;
+          }
+        }
+        /* margin between the two bit values, in units of total weight:
+         * (W1 - W0) / Wtot = 2*W1/Wtot - 1, range [-1, 1]. */
+        const double lead = 2.0 * weight_ones / weight_total - 1.0;
+        if (lead >= d->lock_margin) {
+          decided_bit = 1;
+        } else if (-lead >= d->lock_margin) {
+          decided_bit = 0;
+        }
+      }
+
+      if (decided_bit >= 0) {
+        out[output_count] = (uint8_t)decided_bit;
         last = best_idx;
         if (locked_decoder) {
           locked_decoder[output_count] = best_idx;

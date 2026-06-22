@@ -46,6 +46,24 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/*
+ * Opt-in internal assertions. The core is built -ffreestanding -fno-builtin
+ * -nostdlib, so it cannot use <assert.h> (that would pull in __assert_fail /
+ * abort from libc). __builtin_trap is a compiler intrinsic - not a libc symbol
+ * and not suppressed by -fno-builtin - so it traps without breaking the
+ * freestanding link. Off by default (zero cost); define DV_DEBUG_ASSERT to arm
+ * the load-bearing invariants in the decoder (see dv_trellis_trace). */
+#if defined(DV_DEBUG_ASSERT)
+#define DV_ASSERT(cond) \
+  do {                  \
+    if (!(cond)) {      \
+      __builtin_trap(); \
+    }                   \
+  } while (0)
+#else
+#define DV_ASSERT(cond) ((void)0)
+#endif
+
 /* Backpointer for one node: where it came from (prev_state, prev_drift_index)
  * and the input bit that got there. */
 typedef struct {

@@ -21,3 +21,4 @@ void *dv_memset(void *dest, int value, size_t n) {
 
 int dv_abs(int value) { return abs(value); }
 double dv_log(double x) { return log(x); }
+double dv_exp(double x) { return exp(x); }

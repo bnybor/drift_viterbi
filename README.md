@@ -81,10 +81,12 @@ When unsure, tune on representative data rather than chasing exact numbers.
 
 ## Decoding against several codes at once
 
-When you don't know which of a few candidate codes produced a stream — they share
-a rate but differ in their generator polynomials — decode against all of them at
-once. For each output bit the multi-decoder keeps the bit from whichever code is
-most confidently locked, and marks the bit `DV_ERASURE` when none clearly wins.
+When you don't know which of a few candidate codes produced a stream — they
+share a rate and constraint length but differ in their generator polynomials —
+decode against all of them at once. For each output bit the multi-decoder
+combines the codes' decoded bits weighted by how well each code fits the stream,
+emitting the value the weight favours, and marks the bit `DV_ERASURE` when no
+code is locked or the weighted vote is too close to call.
 
 ```c
 const dv_code *codes[] = { code_a, code_b, code_c };   /* same rate */
@@ -106,12 +108,13 @@ dv_multi_destroy(m);   /* frees the decoders it built; you still own the codes *
 ```
 
 `dv_multi_decoder` is an opaque handle. It builds one stream decoder per code from
-the shared `stream` settings, so the codes must share a rate (`dv_code_n`) and
-must outlive the multi-decoder. The optional `locked_decoder` array (here `which`)
-reports, per output bit, the index of the winning code or `-1` where the bit was
-erased. `lock_floor` / `lock_margin` set how confident a code must be — in
-absolute lock probability and in lead over the next-best code — to win a bit
-rather than abstain (defaults 0.6 and 0.2).
+the shared `stream` settings, so the codes must share a rate (`dv_code_n`) and a
+constraint length (`dv_code_k`), and must outlive the multi-decoder. The optional
+`locked_decoder` array (here `which`) reports, per output bit, the index of the
+likeliest code or `-1` where the bit was erased. `lock_floor` / `lock_margin` set
+how confident the combiner must be — in the best code's absolute lock probability,
+and in the winning bit value's lead over the other as a share of the total
+likelihood weight — to commit a bit rather than abstain (defaults 0.6 and 0.2).
 
 ## Build
 

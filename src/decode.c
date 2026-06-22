@@ -224,7 +224,13 @@ static double normalize(double *metric, size_t count) {
 /* Shift one trellis's drift window by `sigma` (each node's drift index
  * drift_index -> drift_index - sigma); the read cursor is advanced once, by
  * dv_decode_step, to match. Nodes shifted out of the window are dropped. Uses
- * next_metric as scratch. */
+ * next_metric as scratch.
+ *
+ * The dropped edge slot is set to INFINITY (sigma > 0 empties the top slot,
+ * sigma < 0 the bottom). forward_pass then skips those slots as sources, so the
+ * emptied edge can never be recorded as a backpointer's prev_drift_index - which
+ * is exactly what keeps dv_trellis_trace's `prev_drift_index + sigma` inside
+ * [0, drift_width) when it steps back across this re-anchor. */
 static void reanchor_metric(const dv_decode_ctx *ctx, dv_trellis *tr,
                             int sigma) {
   const int num_states = ctx->num_states, drift_width = ctx->drift_width;
@@ -354,6 +360,9 @@ void dv_decode_step(dv_decode_ctx *ctx, dv_trellis *trs, size_t n) {
 unsigned char dv_trellis_trace(const dv_decode_ctx *ctx, const dv_trellis *tr,
                                int frontier, long long target) {
   const size_t count = (size_t)ctx->num_states * ctx->drift_width;
+  /* Traceback only reaches back through retained ring layers; a deeper target
+   * would read a backpointer/shift slot the next step has already overwritten. */
+  DV_ASSERT(ctx->steps - target <= ctx->decision_depth);
   int node = frontier;
   unsigned char bit = 0;
   for (long long i = ctx->steps - 1; i >= target; --i) {
@@ -364,8 +373,12 @@ unsigned char dv_trellis_trace(const dv_decode_ctx *ctx, const dv_trellis *tr,
       bit = entry.bit;
       break;
     }
-    node = entry.prev_state * ctx->drift_width +
-           (entry.prev_drift_index + ctx->shift[i % ctx->decision_depth]);
+    const int prev_drift_index =
+        entry.prev_drift_index + ctx->shift[i % ctx->decision_depth];
+    /* In-bounds by construction: reanchor_metric empties the slot that would
+     * translate out of the window, so it is never a recorded predecessor. */
+    DV_ASSERT(prev_drift_index >= 0 && prev_drift_index < ctx->drift_width);
+    node = entry.prev_state * ctx->drift_width + prev_drift_index;
   }
   return bit;
 }

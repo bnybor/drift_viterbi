@@ -49,7 +49,9 @@ static int parity(unsigned int bits) {
 
 dv_code *dv_code_create(int K, const unsigned int *generators,
                         int num_generators) {
-  if (!generators || K < 2 || num_generators < 1) {
+  /* K is documented as 2..9 (encode.h). The upper bound also keeps 1 << (K-1)
+   * well clear of int-shift UB and the trellis a sane size. */
+  if (!generators || K < 2 || K > 9 || num_generators < 1) {
     return NULL;
   }
 

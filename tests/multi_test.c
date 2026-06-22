@@ -346,6 +346,74 @@ static void test_multi_args(void) {
   dv_multi_destroy(empty);
 }
 
+/* Two decoders for the SAME code lock equally well, so a hard "best minus
+ * next-best lock" selector would see ~zero lead and erase every bit. Likelihood-
+ * weighted combining instead lets their agreeing votes reinforce, so the stream
+ * decodes in full - the behaviour that distinguishes soft combining from picking
+ * a single winner. */
+static void duplicate_code_trial(uint64_t seed) {
+  uint64_t rng = seed;
+  dv_code *a = dv_code_create_standard(DV_CODE_K7_RATE_1_3);
+  dv_code *b = dv_code_create_standard(DV_CODE_K7_RATE_1_3);
+  assert(a && b);
+  const dv_code *codes[] = {a, b};
+  dv_multi_decoder *md = dv_multi_create(&(dv_multi_params){
+      .codes = codes,
+      .codes_len = 2,
+      .stream = {.decision_depth = DEPTH, .p_sub = 0.02}});
+  assert(md != NULL);
+
+  uint8_t *msg = malloc((size_t)N_INFO);
+  rand_bits(msg, N_INFO, &rng);
+  int clen = N_INFO * dv_code_n(a);
+  uint8_t *coded = malloc((size_t)clen);
+  int st = 0;
+  dv_code_encode(a, msg, N_INFO, &st, coded);
+
+  int cap = N_INFO + 64;
+  uint8_t *out = malloc((size_t)cap);
+  int *locked = malloc((size_t)cap * sizeof(int));
+  int got = multi_decode_all(md, coded, clen, out, locked, cap);
+
+  int decoded = 0, bit_errors = 0;
+  for (int i = 0; i < got; ++i) {
+    if (out[i] == DV_ERASURE) continue;
+    ++decoded;
+    if (i < N_INFO && out[i] != msg[i]) ++bit_errors;
+  }
+  check("duplicate-code: output aligns 1:1 with message", got == N_INFO);
+  check("duplicate-code: no errors among decoded bits", bit_errors == 0);
+  check_gt("duplicate-code: agreeing votes commit rather than erase",
+           (double)decoded, (double)N_INFO / 2);
+
+  free(locked);
+  free(out);
+  free(coded);
+  free(msg);
+  dv_multi_destroy(md);
+  dv_code_destroy(a);
+  dv_code_destroy(b);
+}
+
+/* A code set that mixes constraint lengths (so different n_states) shares a rate
+ * but not a trellis geometry; dv_multi_create must reject it rather than let a
+ * trellis sized for the larger code index the smaller code's tables out of
+ * bounds. */
+static void test_reject_incompatible(void) {
+  dv_code *k7 = dv_code_create_standard(DV_CODE_K7_RATE_1_2);
+  dv_code *k3 = dv_code_create_standard(DV_CODE_K3_RATE_1_2);
+  assert(k7 && k3);
+  const dv_code *mixed[] = {k7, k3}; /* same dv_code_n (2), different dv_code_k */
+  dv_multi_decoder *md = dv_multi_create(&(dv_multi_params){
+      .codes = mixed,
+      .codes_len = 2,
+      .stream = {.decision_depth = DEPTH, .p_sub = 0.02}});
+  check("multi rejects mixed constraint lengths", md == NULL);
+  dv_multi_destroy(md); /* NULL-safe */
+  dv_code_destroy(k7);
+  dv_code_destroy(k3);
+}
+
 int main(void) {
   const uint64_t seed = 0xD1F7C0DEULL;
 
@@ -414,5 +482,7 @@ int main(void) {
   }
 
   test_multi_args(); /* serial: uses REQUIRE, must not run inside a trial */
+  duplicate_code_trial(seed + 800); /* soft combining: agreeing votes reinforce */
+  test_reject_incompatible();       /* incompatible code sets are refused       */
   return test_summary("multi");
 }
