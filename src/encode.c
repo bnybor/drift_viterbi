@@ -26,8 +26,7 @@
 
 #include <drift_viterbi/encode.h>
 
-#include <stdlib.h>
-#include <string.h>
+#include <drift_viterbi/stdlib.h>
 
 #include "dv_internal.h"
 
@@ -54,7 +53,7 @@ dv_code *dv_code_create(int K, const unsigned int *generators,
     return NULL;
   }
 
-  dv_code *code = calloc(1, sizeof(*code));
+  dv_code *code = dv_calloc(1, sizeof(*code));
   if (!code) {
     return NULL;
   }
@@ -63,9 +62,9 @@ dv_code *dv_code_create(int K, const unsigned int *generators,
   code->n_states = 1 << (K - 1);
   code->input_tap = 1u << (K - 1);
 
-  code->generators = malloc((size_t)code->n * sizeof(unsigned int));
-  code->next_state = malloc((size_t)code->n_states * 2 * sizeof(int));
-  code->output = malloc((size_t)code->n_states * 2 * code->n * sizeof(uint8_t));
+  code->generators = dv_malloc((size_t)code->n * sizeof(unsigned int));
+  code->next_state = dv_malloc((size_t)code->n_states * 2 * sizeof(int));
+  code->output = dv_malloc((size_t)code->n_states * 2 * code->n * sizeof(uint8_t));
   if (!code->generators || !code->next_state || !code->output) {
     dv_code_destroy(code);
     return NULL;
@@ -170,10 +169,10 @@ void dv_code_destroy(dv_code *code) {
   if (!code) {
     return;
   }
-  free(code->generators);
-  free(code->next_state);
-  free(code->output);
-  free(code);
+  dv_free(code->generators);
+  dv_free(code->next_state);
+  dv_free(code->output);
+  dv_free(code);
 }
 
 int dv_code_n(const dv_code *code) { return code ? code->n : -1; }

@@ -26,9 +26,9 @@
 
 #include <drift_viterbi/compare.h>
 
+#include <drift_viterbi/stdlib.h>
+
 #include <math.h>
-#include <stdlib.h>
-#include <string.h>
 
 /* clang-format off */
 /*
@@ -88,7 +88,7 @@ static const double DV_DUAL_SATISFACTION_THRESHOLD = 0.85;
 #define DV_OFFSET_WIDTH (2 * DV_MAX_CUMULATIVE_DRIFT + 1)
 
 /* Nominal channel priors, used only to weight the offset-path DP - only their
- * relative sizes matter, mirroring the decoder's -log(p) branch metrics. A
+ * relative sizes matter, mirroring the decoder's -dv_log(p) branch metrics. A
  * violated parity check is scored as a substitution; a +/-1 offset step (an
  * inserted/dropped bit in the stream relative to the basis frame) as an indel.
  */
@@ -167,7 +167,7 @@ static int *dv_dual_spectrum(const uint8_t *stream, size_t len, int n,
   if (max_windows > 0 && window_count > max_windows) {
     window_count = max_windows;
   }
-  int *spectrum = calloc(bin_count, sizeof(*spectrum));
+  int *spectrum = dv_calloc(bin_count, sizeof(*spectrum));
   if (!spectrum) {
     return NULL;
   }
@@ -203,7 +203,7 @@ static int *dv_dual_spectrum(const uint8_t *stream, size_t len, int n,
 static int dv_dual_basis(const int *spectrum, long window_count,
                          int window_bits, uint32_t *basis) {
   uint32_t row_for_bit[DV_MAX_WINDOW_BITS];
-  memset(row_for_bit, 0, sizeof(row_for_bit));
+  dv_memset(row_for_bit, 0, sizeof(row_for_bit));
 
   size_t bin_count = (size_t)1 << window_bits;
   for (size_t vector = 1; vector < bin_count; ++vector) {
@@ -262,7 +262,7 @@ static int recover_segment_nullspace(const uint8_t *stream, size_t len, int n,
   /* Row-echelon basis of the code space: pivot[bit] (if set) has its leading 1
    * at `bit`. Standard GF(2) elimination, the same idiom as dv_dual_basis. */
   uint32_t pivot[DV_HARD_WINDOW_CAP];
-  memset(pivot, 0, sizeof(pivot));
+  dv_memset(pivot, 0, sizeof(pivot));
   for (long window_index = 0; window_index < window_count; ++window_index) {
     uint32_t row =
         dv_window(stream, (size_t)window_index * (size_t)n, window_bits);
@@ -329,7 +329,7 @@ static int recover_segment(const uint8_t *stream, size_t len, int n,
         (used >= dv_min_recovery_windows(n, window_bits))
             ? dv_dual_basis(spectrum, used, window_bits, basis)
             : 0;
-    free(spectrum);
+    dv_free(spectrum);
     return dimension;
   }
   return recover_segment_nullspace(stream, len, n, window_bits, max_windows,
@@ -397,9 +397,9 @@ static double dv_cross_satisfaction(const uint8_t *stream, size_t len, int n,
     window_count = DV_MAX_CROSS_WINDOWS;
   }
 
-  const double cost_match = -log(1.0 - DV_NOMINAL_P_SUB);
-  const double cost_miss = -log(DV_NOMINAL_P_SUB);
-  const double cost_indel = -log(DV_NOMINAL_P_INDEL);
+  const double cost_match = -dv_log(1.0 - DV_NOMINAL_P_SUB);
+  const double cost_miss = -dv_log(DV_NOMINAL_P_SUB);
+  const double cost_indel = -dv_log(DV_NOMINAL_P_INDEL);
 
   /* Two rolling rows of {cost, good}; offset_index maps to offset =
    * offset_index - max_offset. offset_width is a compile-time constant, so
@@ -412,7 +412,7 @@ static double dv_cross_satisfaction(const uint8_t *stream, size_t len, int n,
     const int offset = offset_index - max_offset;
     cost[offset_index] = INFINITY;
     good[offset_index] = 0;
-    if (abs(offset) > DV_MAX_DRIFT || offset < 0 ||
+    if (dv_abs(offset) > DV_MAX_DRIFT || offset < 0 ||
         offset + window_bits > (long)len) {
       continue;
     }
@@ -459,8 +459,8 @@ static double dv_cross_satisfaction(const uint8_t *stream, size_t len, int n,
                                 (double)good_count * cost_match;
       next_good[offset_index] = best_good + good_count;
     }
-    memcpy(cost, next_cost, sizeof(cost));
-    memcpy(good, next_good, sizeof(good));
+    dv_memcpy(cost, next_cost, sizeof(cost));
+    dv_memcpy(good, next_good, sizeof(good));
   }
 
   double best = INFINITY;
@@ -546,7 +546,7 @@ static int recover_basis(const uint8_t *stream, size_t len, int n,
     if (self_satisfaction > best_self_satisfaction) {
       best_self_satisfaction = self_satisfaction;
       best_dimension = dimension;
-      memcpy(basis, candidate, (size_t)dimension * sizeof(*candidate));
+      dv_memcpy(basis, candidate, (size_t)dimension * sizeof(*candidate));
       if (self_satisfaction >= DV_SELF_SATISFACTION_GOOD) {
         break;
       }

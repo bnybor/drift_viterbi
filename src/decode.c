@@ -26,9 +26,9 @@
 
 #include <drift_viterbi/decode.h>
 
+#include <drift_viterbi/stdlib.h>
+
 #include <math.h>
-#include <stdlib.h>
-#include <string.h>
 
 #include "dv_internal.h"
 
@@ -110,7 +110,7 @@ static void compact_received(struct dv_stream_decoder *sd) {
   if (keep_from <= 0) {
     return;
   }
-  memmove(sd->received, sd->received + keep_from,
+  dv_memmove(sd->received, sd->received + keep_from,
           (size_t)(sd->received_length - keep_from));
   sd->received_length -= keep_from;
   sd->read_base -= keep_from;
@@ -124,7 +124,7 @@ static int reserve_received(struct dv_stream_decoder *sd, int extra) {
     if (new_capacity < sd->received_length + extra) {
       new_capacity = sd->received_length + extra;
     }
-    uint8_t *new_buffer = realloc(sd->received, (size_t)new_capacity);
+    uint8_t *new_buffer = dv_realloc(sd->received, (size_t)new_capacity);
     if (!new_buffer) {
       return DV_ERR_ALLOC;
     }
@@ -266,7 +266,7 @@ static void reanchor(struct dv_stream_decoder *sd, int sigma) {
               : INFINITY;
     }
   }
-  memcpy(sd->metric, sd->next_metric,
+  dv_memcpy(sd->metric, sd->next_metric,
          (size_t)num_states * drift_width * sizeof(double));
   sd->read_base += sigma;
 }
@@ -479,7 +479,7 @@ dv_stream_decoder *dv_stream_decoder_create(const dv_code *code,
     return NULL;
   }
 
-  struct dv_stream_decoder *sd = calloc(1, sizeof(*sd));
+  struct dv_stream_decoder *sd = dv_calloc(1, sizeof(*sd));
   if (!sd) {
     return NULL;
   }
@@ -494,12 +494,12 @@ dv_stream_decoder *dv_stream_decoder_create(const dv_code *code,
    * received and flipped with prob p_sub. The common (1 - p_erase) factor is
    * kept explicit so paths reading different erasure counts compare correctly
    * (p_erase = 0 reduces these to the plain hard-decision metric). */
-  sd->cost_match = -log((1.0 - p_erase) * (1.0 - p_sub));
-  sd->cost_miss = -log((1.0 - p_erase) * p_sub);
-  sd->cost_erase = -log(p_erase); /* +inf when p_erase == 0 (never read) */
-  sd->cost_keep = -log(1.0 - p_ins - p_del);
-  sd->cost_ins = -log(p_ins);
-  sd->cost_del = -log(p_del);
+  sd->cost_match = -dv_log((1.0 - p_erase) * (1.0 - p_sub));
+  sd->cost_miss = -dv_log((1.0 - p_erase) * p_sub);
+  sd->cost_erase = -dv_log(p_erase); /* +inf when p_erase == 0 (never read) */
+  sd->cost_keep = -dv_log(1.0 - p_ins - p_del);
+  sd->cost_ins = -dv_log(p_ins);
+  sd->cost_del = -dv_log(p_del);
 
   /* Lock anchors (per step = n coded bits). A "kept" coded bit costs cost_keep
    * plus a match/miss term; the expected misfit fraction is p_sub when locked,
@@ -520,16 +520,16 @@ dv_stream_decoder *dv_stream_decoder_create(const dv_code *code,
       sd->expected_unlock; /* assume unlocked until the stream proves it */
 
   const size_t count = (size_t)sd->num_states * sd->drift_width;
-  sd->metric = malloc(count * sizeof(double));
-  sd->next_metric = malloc(count * sizeof(double));
+  sd->metric = dv_malloc(count * sizeof(double));
+  sd->next_metric = dv_malloc(count * sizeof(double));
   sd->backpointers =
-      malloc((size_t)sd->decision_depth * count * sizeof(dv_backpointer));
-  sd->shift = malloc((size_t)sd->decision_depth * sizeof(int));
-  sd->alignment = malloc((size_t)(sd->n + 1) * (sd->n + 2 * sd->max_drift + 1) *
+      dv_malloc((size_t)sd->decision_depth * count * sizeof(dv_backpointer));
+  sd->shift = dv_malloc((size_t)sd->decision_depth * sizeof(int));
+  sd->alignment = dv_malloc((size_t)(sd->n + 1) * (sd->n + 2 * sd->max_drift + 1) *
                          sizeof(double));
   sd->received_capacity =
       (sd->decision_depth + 2) * sd->n + 8 * sd->max_drift + 64;
-  sd->received = malloc((size_t)sd->received_capacity);
+  sd->received = dv_malloc((size_t)sd->received_capacity);
   if (!sd->metric || !sd->next_metric || !sd->backpointers || !sd->shift ||
       !sd->alignment || !sd->received) {
     dv_stream_decoder_destroy(sd);
@@ -544,13 +544,13 @@ void dv_stream_decoder_destroy(dv_stream_decoder *sd) {
   if (!sd) {
     return;
   }
-  free(sd->metric);
-  free(sd->next_metric);
-  free(sd->backpointers);
-  free(sd->shift);
-  free(sd->alignment);
-  free(sd->received);
-  free(sd);
+  dv_free(sd->metric);
+  dv_free(sd->next_metric);
+  dv_free(sd->backpointers);
+  dv_free(sd->shift);
+  dv_free(sd->alignment);
+  dv_free(sd->received);
+  dv_free(sd);
 }
 
 int dv_stream_decode(dv_stream_decoder *sd, const uint8_t *in, int n_in,
@@ -563,7 +563,7 @@ int dv_stream_decode(dv_stream_decoder *sd, const uint8_t *in, int n_in,
   if (status < 0) {
     return status;
   }
-  memcpy(sd->received + sd->received_length, in, (size_t)n_in);
+  dv_memcpy(sd->received + sd->received_length, in, (size_t)n_in);
   sd->received_length += n_in;
   return run(sd, out, lock_probability, max_out, /*draining=*/0);
 }
