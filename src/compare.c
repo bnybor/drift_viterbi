@@ -746,14 +746,32 @@ static double dv_detect_confidence(double excess_sum) {
 }
 
 /*
+ * Degeneracy guard. A genuine rate-1/n, constraint-k code carries exactly
+ * (k+1) information bits in an n*(k+1)-bit window (one per input step it
+ * spans), so its dual (parity-check) space there has dimension at most
+ * (n-1)*(k+1). A degenerate stream - a constant, a low-period pattern, or a
+ * strongly DC-biased one - instead has its dual fill nearly the whole window:
+ * every parity vector sits at alignment +/-1, so the energy statistic
+ * saturates and a pure energy detector calls it a code. Heavy erasure is the
+ * common trap: DV_ERASURE (0xFF) reads as a 1 bit, so as the erasure rate
+ * climbs the stream tends to all-ones, and even at moderate rates the 1-bias
+ * lights up every single-bit check. Recovered duals wider than this cap are
+ * rejected. window_bits = n*(k+1), so (k+1) = window_bits / n. */
+static int dv_max_dual(int n, int window_bits) {
+  return (n - 1) * (window_bits / n);
+}
+
+/*
  * Lever 1 scorer over a WHT spectrum: greedily select the strongest linearly
  * independent parity vectors (largest |alignment|), with no hard satisfaction
  * gate, and accumulate each one's alignment in excess of the H0 peak floor.
  * Independence is enforced by GF(2) reduction so a check and its multiples are
  * not double-counted. Also returns the selected basis (for lever 3 / the
- * sequential path) via basis_out/dim_out when non-NULL.
+ * sequential path) via basis_out/dim_out when non-NULL. Rejects (excess 0,
+ * dimension 0) when the recovered dual is too wide to be a genuine rate-1/n
+ * code - the degeneracy guard above.
  */
-static double dv_spectral_excess(const int *spectrum, long window_count,
+static double dv_spectral_excess(const int *spectrum, long window_count, int n,
                                  int window_bits, uint32_t *basis_out,
                                  int *dim_out) {
   const double floor = dv_peak_floor(window_bits, window_count);
@@ -795,6 +813,12 @@ static double dv_spectral_excess(const int *spectrum, long window_count,
     ++dimension;
     excess_sum += best_align - floor;
   }
+  /* Degeneracy guard: a dual this wide is a constant/biased stream, not a
+   * code. Reject rather than let the saturated energy through. */
+  if (dimension > dv_max_dual(n, window_bits)) {
+    if (dim_out) *dim_out = 0;
+    return 0.0;
+  }
   if (dim_out) *dim_out = dimension;
   return excess_sum;
 }
@@ -821,7 +845,7 @@ static double dv_phase_excess_wht(const uint8_t *stream, size_t len, int n,
     return 0.0;
   }
   double excess =
-      dv_spectral_excess(spectrum, used, window_bits, basis_out, dim_out);
+      dv_spectral_excess(spectrum, used, n, window_bits, basis_out, dim_out);
   dv_free(spectrum);
   return excess;
 }
@@ -933,12 +957,13 @@ static double dv_phase_excess_wide(const uint8_t *stream, size_t len, int n,
   uint32_t best_basis[DV_HARD_WINDOW_CAP];
   int best_dim = 0;
   double best_fixed = 0.0;
+  const int max_dual = dv_max_dual(n, window_bits);
   for (long start = 0; start + min_windows <= total_windows; start += seg) {
     const size_t off = (size_t)phase + (size_t)start * (size_t)n;
     uint32_t cand[DV_HARD_WINDOW_CAP];
     int dim = recover_segment_nullspace(stream + off, len - off, n, window_bits,
                                         seg, cand);
-    if (dim <= 0) continue;
+    if (dim <= 0 || dim > max_dual) continue; /* skip empty/degenerate duals */
     double fixed = dv_basis_excess_fixed(stream, len, n, window_bits, phase,
                                          cand, dim);
     if (fixed > best_fixed) {
@@ -1068,6 +1093,7 @@ long dv_detect_sequential(int n, int k, const uint8_t *sample, size_t len,
       if ((size_t)phase + (size_t)window_bits > warmup) continue;
       dim = recover_segment_nullspace(sample + phase, warmup - (size_t)phase, n,
                                       window_bits, 4L * window_bits, cand);
+      if (dim > dv_max_dual(n, window_bits)) dim = 0; /* degenerate: reject */
       excess = dv_basis_excess_fixed(sample, warmup, n, window_bits, phase, cand,
                                      dim);
     }
