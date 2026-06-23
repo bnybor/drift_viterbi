@@ -36,8 +36,8 @@ target_compile_features(drift_viterbi_bare PUBLIC c_std_11)
 # The public library: the core and the stdlib shims archived together into one
 # self-contained libdrift_viterbi.a. Both sets of objects are copied straight in
 # via $<TARGET_OBJECTS>, so there is no link dependency on the object libraries
-# and every object is kept (no -Wl,--whole-archive wrapping needed). libm is
-# carried through for the stdlib shims' math symbols.
+# and every object is kept. libm is carried through for the stdlib shims' math
+# symbols.
 add_library(drift_viterbi STATIC
     $<TARGET_OBJECTS:drift_viterbi_bare_obj>
     $<TARGET_OBJECTS:drift_viterbi_stdlib>)

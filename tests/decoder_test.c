@@ -217,7 +217,7 @@ static void test_stream_reanchor(void) {
 /* Indels placed in the MIDDLE of coded groups, not at group boundaries. The
  * bit-level alignment tracks an indel at any bit position, so an otherwise
  * clean stream is recovered essentially perfectly - the group holding the indel
- * is no longer smeared into a burst of substitution errors. */
+ * is not smeared into a burst of substitution errors. */
 static void test_stream_midgroup_indel(void) {
   printf("test_stream_midgroup_indel\n");
   dv_code *code = dv_code_create(K, GENERATORS, N_GEN); /* group size N_GEN=5 */

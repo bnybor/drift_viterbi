@@ -671,52 +671,43 @@ double dv_compare(int n, int k, uint8_t *lhs, size_t lhs_len, uint8_t *rhs,
 /* ========================================================================== *
  *  Graded blind detection (dv_detect)                                        *
  *                                                                            *
- *  The old dv_detect gated its answer on EXACT dual-basis recovery, which in *
- *  turn gated on two hard thresholds (DV_DUAL_SATISFACTION_THRESHOLD = 0.85  *
- *  per parity check, then DV_SELF_SATISFACTION_FLOOR = 0.9 on the basis).    *
- *  Those thresholds snap to zero roughly an order of magnitude below where   *
- *  the decoder still locks: once the true checks dip under 0.85 they vanish  *
- *  from the basis all at once (they share a weight, so they die together),   *
- *  the dimension drops to zero, and detection collapses off a cliff - even   *
- *  though the dual-space ENERGY is still towering over the H0 noise floor.   *
+ *  dv_detect answers whether a buffer carries a rate-1/n, constraint-        *
+ *  length-k code without knowing the generators or the sent bits, and keeps  *
+ *  that answer graded, sliding smoothly to zero as noise rises. It rests on  *
+ *  four parts:                                                               *
  *                                                                            *
- *  This rewrite keeps the answer graded. It rests on four changes:           *
+ *   Part 1 - graded statistic. The WHT coefficient of a parity vector v is   *
+ *     spectrum[v] = (#satisfied - #violated) windows; its alignment          *
+ *     a(v) = spectrum[v] / window_count = 2*sat_frac - 1 is in [-1, 1].      *
+ *     Under H0 (random data) a(v) ~ N(0, 1/window_count), so the largest     *
+ *     of the ~2^window_bits vectors sits at roughly                          *
+ *     sqrt(2*window_bits*ln2)/sqrt(window_count) (an extreme-value floor).   *
+ *     The strongest independent peaks are summed in excess of that floor:    *
+ *     a clean code saturates the sum, noise slides it smoothly to zero.      *
  *                                                                            *
- *   Lever 1 - graded statistic, decoupled from exact recovery. The WHT       *
- *     coefficient of a parity vector v is spectrum[v] = (#satisfied -        *
- *     #violated) windows; its alignment a(v) = spectrum[v] / window_count =  *
- *     2*sat_frac - 1 is in [-1, 1]. Under H0 (random data) a(v) ~            *
- *     N(0, 1/window_count), so the largest of the ~2^window_bits vectors     *
- *     sits at roughly sqrt(2*window_bits*ln2)/sqrt(window_count) (an extreme *
- *     -value floor). We pick the strongest INDEPENDENT peaks with NO 0.85    *
- *     gate and sum their alignment in excess of that floor. A clean code     *
- *     saturates the sum; noise slides it smoothly to zero. No cliff.         *
+ *   Part 2 - pool evidence across the whole stream, per phase. The WHT is    *
+ *     linear in the histogram, so every window of the stream is              *
+ *     histogrammed. Because an indel flips the slide-by-n phase, n separate  *
+ *     phase histograms are kept (start position mod n) and the strongest     *
+ *     phase is taken: each clean run between indels lands wholly in one      *
+ *     phase bin, raising window_count (hence SNR) and surviving scattered    *
+ *     indels.                                                                *
  *                                                                            *
- *   Lever 2 - pool evidence across the whole stream, per phase. The WHT is   *
- *     linear in the histogram, so instead of recovering from a single short  *
- *     segment we histogram every window of the stream. Because an indel      *
- *     flips the slide-by-n phase, we keep n separate phase histograms (start *
- *     position mod n) and take the strongest phase: each clean run between    *
- *     indels lands wholly in one phase bin and adds to that bin's peaks,      *
- *     raising window_count (hence SNR) and surviving scattered indels.       *
+ *   Part 3 - drift-corrected re-accumulation. Given a candidate basis, the   *
+ *     stream is walked re-anchoring the frame by +/-1 bit per symbol to      *
+ *     keep the basis satisfied (a greedy analog of the decoder's drift       *
+ *     window), and re-scored along that path, pulling post-indel windows     *
+ *     back into alignment so they reinforce the peaks.                       *
  *                                                                            *
- *   Lever 3 - drift-corrected re-accumulation. Recovery (the fixed slide-by  *
- *     -n histogram) was never indel-tolerant even though scoring was. Given  *
- *     a candidate basis we walk the stream re-anchoring the frame by +/-1    *
- *     bit per symbol to keep the basis satisfied (a greedy analog of the     *
- *     decoder's drift window), and re-score along that path. This pulls      *
- *     post-indel windows back into alignment so they reinforce the peaks.    *
- *                                                                            *
- *   Lever 4 - a sequential detector (dv_detect_sequential): recover a basis  *
- *     from a warmup prefix, then run a one-sided CUSUM of the per-window      *
+ *   Part 4 - a sequential detector (dv_detect_sequential): recover a basis   *
+ *     from a warmup prefix, then run a one-sided CUSUM of the per-window     *
  *     satisfied-check log-likelihood ratio (H1 vs the H0 rate 0.5), so a     *
  *     "code present" call fires as soon as enough evidence accrues rather    *
  *     than waiting for a whole-buffer verdict - graceful and low-latency.    *
  *                                                                            *
  *  Detection SNR is fundamentally sqrt(window_count)-limited: the floor      *
  *  shrinks only as 1/sqrt(window_count), so a longer capture detects a       *
- *  noisier stream. That is physics, not a tunable - but the graded statistic *
- *  spends every bit of available SNR instead of throwing it away at 0.85.    *
+ *  noisier stream. That is physics, not a tunable.                           *
  * ========================================================================== */
 
 /* sqrt built from the stdlib's exp/log (the freestanding build has no libm
@@ -945,7 +936,7 @@ static double dv_basis_excess_drift(const uint8_t *stream, size_t len, int n,
  * SEGMENTS forward - as the original recover_basis does - and keep the one
  * whose basis best explains the whole stream under the graded score; a clean
  * run between indels validates itself, and the drift pass then carries it
- * across the rest. Substitutes the graded excess for the old 0.9 self-floor. */
+ * across the rest. */
 static double dv_phase_excess_wide(const uint8_t *stream, size_t len, int n,
                                    int window_bits, int phase) {
   if ((size_t)phase + (size_t)window_bits > len) return 0.0;

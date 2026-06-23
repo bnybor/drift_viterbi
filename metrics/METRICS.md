@@ -137,10 +137,10 @@ Per coded bit (`n`× larger; identical cliff positions):
 ### Lock probability
 
 The decoder's own running confidence that it is tracking a valid coded stream,
-averaged over the kept bits. With the model pegged at 1% rather than matched to
-the channel, lock is no longer flattered into staying high: it falls from ~1.0
-along a descent and settles onto a plateau as each impairment ramps, so the curve
-genuinely tracks the decoder being surprised rather than reporting false comfort.
+averaged over the kept bits. Because the model is pegged at 1% rather than
+matched to the channel, lock genuinely tracks the decoder being surprised: it
+falls from ~1.0 along a descent and settles onto a plateau as each impairment
+ramps, reflecting real loss of confidence rather than false comfort.
 The descent is where the structure lives (the plots sample it densely); past it
 the plateau is flat. Two endpoints are special: under deletion the stream empties
 out near 100% and lock collapses to zero, and under flips a rate near 100% is a

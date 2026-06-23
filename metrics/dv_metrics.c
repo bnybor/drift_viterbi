@@ -432,10 +432,10 @@ static point_model make_model(const dv_code *code) {
    * decoder is never told what the channel is doing - that is the point. At low
    * rates it sees roughly what it expects; as a rate climbs it meets something
    * increasingly unexpected, which is exactly the stress the sweep is meant to
-   * measure. Matching the model to the channel (the old behaviour) let the
-   * decoder cheat and made every code look better than it really is. Drift
-   * tracking is always on so the pegged insertion/deletion assumption is live on
-   * every axis, not just the indel ones. */
+   * measure. Matching the model to the channel would let the decoder cheat and
+   * make every code look better than it really is. Drift tracking is always on
+   * so the pegged insertion/deletion assumption is live on every axis, not just
+   * the indel ones. */
   const double pegged = 0.01;
   m.max_drift = 8;
   m.decision_depth = 8 * m.constraint_len;
