@@ -668,14 +668,302 @@ double dv_compare(int n, int k, uint8_t *lhs, size_t lhs_len, uint8_t *rhs,
                                                : cross_rhs_on_lhs;
 }
 
+/* ========================================================================== *
+ *  Graded blind detection (dv_detect)                                        *
+ *                                                                            *
+ *  The old dv_detect gated its answer on EXACT dual-basis recovery, which in *
+ *  turn gated on two hard thresholds (DV_DUAL_SATISFACTION_THRESHOLD = 0.85  *
+ *  per parity check, then DV_SELF_SATISFACTION_FLOOR = 0.9 on the basis).    *
+ *  Those thresholds snap to zero roughly an order of magnitude below where   *
+ *  the decoder still locks: once the true checks dip under 0.85 they vanish  *
+ *  from the basis all at once (they share a weight, so they die together),   *
+ *  the dimension drops to zero, and detection collapses off a cliff - even   *
+ *  though the dual-space ENERGY is still towering over the H0 noise floor.   *
+ *                                                                            *
+ *  This rewrite keeps the answer graded. It rests on four changes:           *
+ *                                                                            *
+ *   Lever 1 - graded statistic, decoupled from exact recovery. The WHT       *
+ *     coefficient of a parity vector v is spectrum[v] = (#satisfied -        *
+ *     #violated) windows; its alignment a(v) = spectrum[v] / window_count =  *
+ *     2*sat_frac - 1 is in [-1, 1]. Under H0 (random data) a(v) ~            *
+ *     N(0, 1/window_count), so the largest of the ~2^window_bits vectors     *
+ *     sits at roughly sqrt(2*window_bits*ln2)/sqrt(window_count) (an extreme *
+ *     -value floor). We pick the strongest INDEPENDENT peaks with NO 0.85    *
+ *     gate and sum their alignment in excess of that floor. A clean code     *
+ *     saturates the sum; noise slides it smoothly to zero. No cliff.         *
+ *                                                                            *
+ *   Lever 2 - pool evidence across the whole stream, per phase. The WHT is   *
+ *     linear in the histogram, so instead of recovering from a single short  *
+ *     segment we histogram every window of the stream. Because an indel      *
+ *     flips the slide-by-n phase, we keep n separate phase histograms (start *
+ *     position mod n) and take the strongest phase: each clean run between    *
+ *     indels lands wholly in one phase bin and adds to that bin's peaks,      *
+ *     raising window_count (hence SNR) and surviving scattered indels.       *
+ *                                                                            *
+ *   Lever 3 - drift-corrected re-accumulation. Recovery (the fixed slide-by  *
+ *     -n histogram) was never indel-tolerant even though scoring was. Given  *
+ *     a candidate basis we walk the stream re-anchoring the frame by +/-1    *
+ *     bit per symbol to keep the basis satisfied (a greedy analog of the     *
+ *     decoder's drift window), and re-score along that path. This pulls      *
+ *     post-indel windows back into alignment so they reinforce the peaks.    *
+ *                                                                            *
+ *   Lever 4 - a sequential detector (dv_detect_sequential): recover a basis  *
+ *     from a warmup prefix, then run a one-sided CUSUM of the per-window      *
+ *     satisfied-check log-likelihood ratio (H1 vs the H0 rate 0.5), so a     *
+ *     "code present" call fires as soon as enough evidence accrues rather    *
+ *     than waiting for a whole-buffer verdict - graceful and low-latency.    *
+ *                                                                            *
+ *  Detection SNR is fundamentally sqrt(window_count)-limited: the floor      *
+ *  shrinks only as 1/sqrt(window_count), so a longer capture detects a       *
+ *  noisier stream. That is physics, not a tunable - but the graded statistic *
+ *  spends every bit of available SNR instead of throwing it away at 0.85.    *
+ * ========================================================================== */
+
+/* sqrt built from the stdlib's exp/log (the freestanding build has no libm
+ * sqrt). Exact enough for a noise-floor estimate. */
+static double dv_sqrt(double x) { return x > 0.0 ? dv_exp(0.5 * dv_log(x)) : 0.0; }
+
+/* Safety margin (in units of the H0 standard deviation) added to the extreme-
+ * value peak floor, so random data reads ~0 rather than skimming the floor. */
+static const double DV_DETECT_PEAK_MARGIN = 1.0;
+
+/* H0 extreme-value floor on |alignment|: the expected largest of ~2^window_bits
+ * unit-Gaussian WHT coefficients is ~sqrt(2*window_bits*ln2) standard
+ * deviations, and one std of alignment is 1/sqrt(window_count). A selected peak
+ * must clear this to count as structure rather than the luckiest noise bin. */
+static double dv_peak_floor(int window_bits, long window_count) {
+  if (window_count <= 0) return 1.0;
+  const double sigmas =
+      dv_sqrt(2.0 * (double)window_bits * 0.69314718055994530942) +
+      DV_DETECT_PEAK_MARGIN;
+  return sigmas / dv_sqrt((double)window_count);
+}
+
+/* Turn a basis's summed excess alignment into a [0,1] confidence. The sum
+ * saturates: a clean code contributes ~dimension * 1, noise contributes ~0. */
+static double dv_detect_confidence(double excess_sum) {
+  return dv_clamp01(excess_sum);
+}
+
+/*
+ * Lever 1 scorer over a WHT spectrum: greedily select the strongest linearly
+ * independent parity vectors (largest |alignment|), with no hard satisfaction
+ * gate, and accumulate each one's alignment in excess of the H0 peak floor.
+ * Independence is enforced by GF(2) reduction so a check and its multiples are
+ * not double-counted. Also returns the selected basis (for lever 3 / the
+ * sequential path) via basis_out/dim_out when non-NULL.
+ */
+static double dv_spectral_excess(const int *spectrum, long window_count,
+                                 int window_bits, uint32_t *basis_out,
+                                 int *dim_out) {
+  const double floor = dv_peak_floor(window_bits, window_count);
+  const size_t bin_count = (size_t)1 << window_bits;
+  uint32_t row_for_bit[DV_MAX_WINDOW_BITS];
+  dv_memset(row_for_bit, 0, sizeof(row_for_bit));
+
+  double excess_sum = 0.0;
+  int dimension = 0;
+  /* At most window_bits independent directions exist; pull them out strongest
+   * first by repeated max-scan. Each scan skips vectors already in the span. */
+  for (int picked = 0; picked < window_bits; ++picked) {
+    double best_align = floor; /* must beat the floor to be picked at all */
+    uint32_t best_vec = 0;
+    for (size_t v = 1; v < bin_count; ++v) {
+      double align = (double)spectrum[v] / (double)window_count;
+      if (align < 0.0) align = -align;
+      if (align <= best_align) continue;
+      /* independence test: reduce v against the current selected span */
+      uint32_t row = (uint32_t)v;
+      for (int bit = window_bits - 1; bit >= 0; --bit) {
+        if (!((row >> bit) & 1u)) continue;
+        if (row_for_bit[bit]) row ^= row_for_bit[bit];
+        else break;
+      }
+      if (row == 0) continue; /* already spanned */
+      best_align = align;
+      best_vec = (uint32_t)v;
+    }
+    if (best_vec == 0) break; /* nothing left above the floor */
+    /* commit best_vec to the span */
+    uint32_t row = best_vec;
+    for (int bit = window_bits - 1; bit >= 0; --bit) {
+      if (!((row >> bit) & 1u)) continue;
+      if (row_for_bit[bit]) row ^= row_for_bit[bit];
+      else { row_for_bit[bit] = row; break; }
+    }
+    if (basis_out) basis_out[dimension] = best_vec;
+    ++dimension;
+    excess_sum += best_align - floor;
+  }
+  if (dim_out) *dim_out = dimension;
+  return excess_sum;
+}
+
+/*
+ * Lever 2 recovery for one phase: pool the WHOLE stream (from byte `phase`,
+ * sliding by n) into one histogram, transform, and score with lever 1. Reuses
+ * dv_dual_spectrum, capped at DV_MAX_CROSS_WINDOWS. WHT path only (window_bits
+ * <= DV_MAX_WINDOW_BITS); wider codes use dv_basis_excess_wide below.
+ */
+static double dv_phase_excess_wht(const uint8_t *stream, size_t len, int n,
+                                  int window_bits, int phase,
+                                  uint32_t *basis_out, int *dim_out) {
+  if ((size_t)phase + (size_t)window_bits > len) {
+    if (dim_out) *dim_out = 0;
+    return 0.0;
+  }
+  long used = 0;
+  int *spectrum =
+      dv_dual_spectrum(stream + phase, len - (size_t)phase, n, window_bits,
+                       DV_MAX_CROSS_WINDOWS, &used);
+  if (!spectrum) {
+    if (dim_out) *dim_out = -1; /* allocation failure */
+    return 0.0;
+  }
+  double excess =
+      dv_spectral_excess(spectrum, used, window_bits, basis_out, dim_out);
+  dv_free(spectrum);
+  return excess;
+}
+
+/*
+ * Graded score of an explicit basis at a fixed phase: each check's satisfied
+ * fraction over the whole stream, summed in excess of the H0 floor. The wide-
+ * window (no-WHT) analog of dv_spectral_excess; also reused by lever 3.
+ */
+static double dv_basis_excess_fixed(const uint8_t *stream, size_t len, int n,
+                                    int window_bits, int phase,
+                                    const uint32_t *basis, int dimension) {
+  if (dimension <= 0) return 0.0;
+  long sat[DV_HARD_WINDOW_CAP];
+  dv_memset(sat, 0, sizeof(sat));
+  long wc = 0;
+  for (long pos = phase; pos + window_bits <= (long)len; pos += n) {
+    uint32_t packed = dv_window(stream, (size_t)pos, window_bits);
+    for (int i = 0; i < dimension; ++i)
+      if (!__builtin_parity(packed & basis[i])) ++sat[i];
+    ++wc;
+    if (wc >= DV_MAX_CROSS_WINDOWS) break;
+  }
+  if (wc == 0) return 0.0;
+  const double floor = dv_peak_floor(window_bits, wc);
+  double excess = 0.0;
+  for (int i = 0; i < dimension; ++i) {
+    double align = 2.0 * ((double)sat[i] / (double)wc) - 1.0;
+    if (align < 0.0) align = -align;
+    if (align > floor) excess += align - floor;
+  }
+  return excess;
+}
+
+/*
+ * Lever 3: re-score `basis` along a drift-corrected path. Starting at `phase`,
+ * advance one symbol at a time but let the frame slip by -1/0/+1 bit per step
+ * (bounded to +/-DV_MAX_CUMULATIVE_DRIFT net), greedily choosing the slip that
+ * best satisfies the basis. Re-anchoring this way pulls post-indel windows back
+ * into frame so they reinforce the peaks instead of smearing them.
+ */
+static double dv_basis_excess_drift(const uint8_t *stream, size_t len, int n,
+                                    int window_bits, int phase,
+                                    const uint32_t *basis, int dimension) {
+  if (dimension <= 0) return 0.0;
+  long sat[DV_HARD_WINDOW_CAP];
+  dv_memset(sat, 0, sizeof(sat));
+  long wc = 0;
+  long pos = phase;
+  long net_drift = 0; /* signed bits of accumulated slip from the nominal frame */
+  /* visit candidate slips in the order {0, +1, -1} so equal-scoring ties keep
+   * step 0 (assume no indel unless a slip strictly helps). */
+  static const int kSteps[3] = {0, 1, -1};
+  while (pos + window_bits <= (long)len) {
+    uint32_t packed = dv_window(stream, (size_t)pos, window_bits);
+    for (int i = 0; i < dimension; ++i)
+      if (!__builtin_parity(packed & basis[i])) ++sat[i];
+    ++wc;
+    if (wc >= DV_MAX_CROSS_WINDOWS) break;
+    /* pick the next frame pos + n + step that best satisfies the basis. */
+    long best_pos = -1;
+    int best_step = 0;
+    int best_good = -1;
+    for (int si = 0; si < 3; ++si) {
+      const int s = kSteps[si];
+      if (dv_abs((int)(net_drift + s)) > DV_MAX_CUMULATIVE_DRIFT) continue;
+      const long cand = pos + n + s;
+      if (cand < 0 || cand + window_bits > (long)len) continue;
+      uint32_t cw = dv_window(stream, (size_t)cand, window_bits);
+      int good = 0;
+      for (int i = 0; i < dimension; ++i)
+        if (!__builtin_parity(cw & basis[i])) ++good;
+      if (good > best_good) {
+        best_good = good;
+        best_pos = cand;
+        best_step = s;
+      }
+    }
+    if (best_pos < 0) break;
+    net_drift += best_step;
+    pos = best_pos;
+  }
+  if (wc == 0) return 0.0;
+  const double floor = dv_peak_floor(window_bits, wc);
+  double excess = 0.0;
+  for (int i = 0; i < dimension; ++i) {
+    double align = 2.0 * ((double)sat[i] / (double)wc) - 1.0;
+    if (align < 0.0) align = -align;
+    if (align > floor) excess += align - floor;
+  }
+  return excess;
+}
+
+/* Recover a candidate basis for one phase (wide-window codes, no WHT). The
+ * nullspace recovery is exact but brittle: a single corrupted window in the
+ * recovery segment (an indel or erasure) yields a useless basis. So we scan
+ * SEGMENTS forward - as the original recover_basis does - and keep the one
+ * whose basis best explains the whole stream under the graded score; a clean
+ * run between indels validates itself, and the drift pass then carries it
+ * across the rest. Substitutes the graded excess for the old 0.9 self-floor. */
+static double dv_phase_excess_wide(const uint8_t *stream, size_t len, int n,
+                                   int window_bits, int phase) {
+  if ((size_t)phase + (size_t)window_bits > len) return 0.0;
+  const long seg = 4L * window_bits;
+  const long total_windows =
+      (long)((len - (size_t)phase - (size_t)window_bits) / (size_t)n) + 1;
+  const long min_windows = dv_min_recovery_windows(n, window_bits);
+
+  uint32_t best_basis[DV_HARD_WINDOW_CAP];
+  int best_dim = 0;
+  double best_fixed = 0.0;
+  for (long start = 0; start + min_windows <= total_windows; start += seg) {
+    const size_t off = (size_t)phase + (size_t)start * (size_t)n;
+    uint32_t cand[DV_HARD_WINDOW_CAP];
+    int dim = recover_segment_nullspace(stream + off, len - off, n, window_bits,
+                                        seg, cand);
+    if (dim <= 0) continue;
+    double fixed = dv_basis_excess_fixed(stream, len, n, window_bits, phase,
+                                         cand, dim);
+    if (fixed > best_fixed) {
+      best_fixed = fixed;
+      best_dim = dim;
+      dv_memcpy(best_basis, cand, (size_t)dim * sizeof(*cand));
+    }
+  }
+  if (best_dim <= 0) return 0.0;
+  /* Lever 3: carry the best basis across the stream along a drift-corrected
+   * path and keep whichever score is stronger. */
+  double drift = dv_basis_excess_drift(stream, len, n, window_bits, phase,
+                                       best_basis, best_dim);
+  return best_fixed > drift ? best_fixed : drift;
+}
+
 /*
  * Detect whether a single buffer carries any rate-1/n, constraint-length-k
- * convolutional code, without identifying which one. Same recovery pipeline as
- * one side of dv_compare: blindly recover the stream's own dual (parity-check)
- * space and measure how well the stream satisfies it. A genuine coded stream
- * obeys its checks (~1), random data does not (~0). Indel tolerance comes from
- * the drift-tolerant offset path in cross-satisfaction and erasure/substitution
- * tolerance from the segment scan, exactly as in dv_compare.
+ * convolutional code, without identifying which one. Blindly recovers the
+ * stream's dual (parity-check) space and measures how strongly the stream's
+ * windows concentrate on it, relative to the H0 noise floor: a coded stream
+ * scores ~1, random data ~0, and the fall-off between is GRADED rather than a
+ * cliff (see the lever notes above). Tolerates substitution, erasure, and -
+ * via per-phase pooling (lever 2) and drift-corrected re-accumulation (lever
+ * 3) - insertion/deletion drift.
  *
  * Returns the probability in [0, 1], or a negative value when it cannot be
  * determined (null buffer, out-of-range code, or too little data).
@@ -697,17 +985,121 @@ double dv_detect(int n, int k, uint8_t *sample, size_t len) {
     return DV_UNDETERMINED;
   }
 
+  double best_excess = 0.0;
+  /* Lever 2: try every framing phase; an indel between clean runs routes them
+   * to different phase bins, so the best phase pools the most clean evidence. */
+  for (int phase = 0; phase < n; ++phase) {
+    double excess;
+    if (window_bits <= DV_MAX_WINDOW_BITS) {
+      uint32_t basis[DV_HARD_WINDOW_CAP];
+      int dim = 0;
+      excess = dv_phase_excess_wht(sample, len, n, window_bits, phase, basis,
+                                   &dim);
+      if (dim < 0) {
+        return DV_UNDETERMINED; /* allocation failure */
+      }
+      /* Lever 3: re-score the recovered basis along a drift-corrected path and
+       * keep whichever explains the stream better. */
+      if (dim > 0) {
+        double drift = dv_basis_excess_drift(sample, len, n, window_bits, phase,
+                                             basis, dim);
+        if (drift > excess) excess = drift;
+      }
+    } else {
+      excess = dv_phase_excess_wide(sample, len, n, window_bits, phase);
+    }
+    if (excess > best_excess) best_excess = excess;
+  }
+  return dv_detect_confidence(best_excess);
+}
+
+/* -- sequential (streaming) detection: lever 4 ----------------------------- */
+
+/* Nominal H1 per-check satisfaction used by the CUSUM log-likelihood ratio:
+ * any value comfortably above the H0 rate 0.5 works; 0.75 fires when windows
+ * consistently satisfy more than ~60% of the recovered checks. */
+static const double DV_DETECT_SEQ_Q1 = 0.75;
+
+/* SPRT error targets -> CUSUM decision threshold log((1-beta)/alpha). */
+static const double DV_DETECT_SEQ_ALPHA = 1e-3;
+static const double DV_DETECT_SEQ_BETA = 1e-3;
+
+/* Warmup prefix (in symbols) used to recover the steering basis before the
+ * CUSUM begins; capped to the available stream. */
+#define DV_DETECT_SEQ_WARMUP_WINDOWS 256
+
+/*
+ * Sequential blind detection. Recovers a steering basis from a warmup prefix
+ * (best phase, same graded recovery as dv_detect), then runs a one-sided CUSUM
+ * of the per-window satisfied-check log-likelihood ratio. Returns the bit index
+ * at which "code present" is first declared, or -1 if the stream never crosses
+ * the threshold (or no basis could be recovered). When confidence_out is
+ * non-NULL it receives a [0,1] reading: 1.0 once declared, else the CUSUM's
+ * closest approach to the threshold as a fraction.
+ */
+long dv_detect_sequential(int n, int k, const uint8_t *sample, size_t len,
+                          double *confidence_out) {
+  if (confidence_out) *confidence_out = 0.0;
+  if (!sample) return -1;
+  const int window_bits = dv_window_bits(n, k);
+  if (window_bits == 0) return -1;
+  if (len < (size_t)window_bits) return -1;
+  const long min_windows = dv_min_recovery_windows(n, window_bits);
+  const long windows = (long)((len - (size_t)window_bits) / (size_t)n) + 1;
+  if (windows < min_windows) return -1;
+
+  /* Warmup recovery: pick the phase whose prefix exposes the strongest dual. */
+  size_t warmup = (size_t)DV_DETECT_SEQ_WARMUP_WINDOWS * (size_t)n +
+                  (size_t)window_bits;
+  if (warmup > len) warmup = len;
   uint32_t basis[DV_HARD_WINDOW_CAP];
-  double self_satisfaction = 0.0;
-  const int dimension =
-      recover_basis(sample, len, n, window_bits, basis, &self_satisfaction);
-  if (dimension < 0) {
-    return DV_UNDETERMINED; /* allocation failure */
+  int dimension = 0;
+  int best_phase = 0;
+  double best_excess = 0.0;
+  for (int phase = 0; phase < n; ++phase) {
+    uint32_t cand[DV_HARD_WINDOW_CAP];
+    int dim = 0;
+    double excess;
+    if (window_bits <= DV_MAX_WINDOW_BITS) {
+      excess = dv_phase_excess_wht(sample, warmup, n, window_bits, phase, cand,
+                                   &dim);
+      if (dim < 0) return -1;
+    } else {
+      if ((size_t)phase + (size_t)window_bits > warmup) continue;
+      dim = recover_segment_nullspace(sample + phase, warmup - (size_t)phase, n,
+                                      window_bits, 4L * window_bits, cand);
+      excess = dv_basis_excess_fixed(sample, warmup, n, window_bits, phase, cand,
+                                     dim);
+    }
+    if (dim > 0 && excess > best_excess) {
+      best_excess = excess;
+      best_phase = phase;
+      dimension = dim;
+      dv_memcpy(basis, cand, (size_t)dim * sizeof(*cand));
+    }
   }
-  if (dimension == 0) {
-    return 0.0; /* no self-validating dual structure -> no code present */
+  if (dimension <= 0) return -1; /* no structure to steer the CUSUM */
+
+  const double l_sat = dv_log(DV_DETECT_SEQ_Q1 / 0.5);
+  const double l_unsat = dv_log((1.0 - DV_DETECT_SEQ_Q1) / 0.5);
+  const double threshold =
+      dv_log((1.0 - DV_DETECT_SEQ_BETA) / DV_DETECT_SEQ_ALPHA);
+
+  double cusum = 0.0;
+  double closest = 0.0;
+  for (long pos = best_phase; pos + window_bits <= (long)len; pos += n) {
+    const int good =
+        dv_window_good(sample, pos, window_bits, basis, dimension);
+    const double llr =
+        (double)good * l_sat + (double)(dimension - good) * l_unsat;
+    cusum += llr;
+    if (cusum < 0.0) cusum = 0.0;
+    if (cusum > closest) closest = cusum;
+    if (cusum >= threshold) {
+      if (confidence_out) *confidence_out = 1.0;
+      return pos; /* bit index of the declaration */
+    }
   }
-  /* Map the self cross-satisfaction (~1 clean, the floor when barely detected)
-   * onto a probability - the single-stream analog of dv_compare's rescale. */
-  return dv_clamp01(2.0 * (self_satisfaction - 0.5));
+  if (confidence_out) *confidence_out = dv_clamp01(closest / threshold);
+  return -1;
 }

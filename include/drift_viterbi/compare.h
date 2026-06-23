@@ -74,6 +74,22 @@ long dv_detect_min_len(int n, int k);
 long dv_detect_max_len(int n, int k);
 
 /*
+ * Sequential (streaming) blind detection. Recovers a steering parity-check
+ * basis from a warmup prefix of `sample`, then runs a one-sided CUSUM of the
+ * per-window satisfied-check log-likelihood ratio (code-present vs the random
+ * H0 rate of one half). Returns the bit index at which a code is first
+ * declared present, or -1 if the stream never crosses the decision threshold
+ * (or no basis could be recovered, or the same out-of-range / too-little-data
+ * conditions as dv_detect). When `confidence_out` is non-NULL it receives a
+ * [0,1] reading: 1.0 once a code is declared, otherwise the CUSUM's closest
+ * approach to the threshold as a fraction. Lower-latency and more graceful
+ * than collapsing a whole buffer into a single dv_detect verdict; the bit
+ * representation is the usual one bit per byte.
+ */
+long dv_detect_sequential(int n, int k, const uint8_t *sample, size_t len,
+                          double *confidence_out);
+
+/*
  * Probability that, for a given rate 1/n and constraint length k, the two
  * stream samples have consistent convolutional-code generator polynomials: ~1
  * when they share the code, ~0 when they do not. Works on streams of any length
