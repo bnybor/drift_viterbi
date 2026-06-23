@@ -167,13 +167,11 @@ ranking. The short-window codes (`K3_R1_2` most of all) therefore stay detectabl
 far longer, which is why the flip/insert/delete axes run out past 20% to follow
 their descent while the wide-window codes have long since collapsed.
 
-Erasures are a special shape. The wide-window codes collapse below ~6% as usual,
-but the short-window rate-1/2 codes (`K3_R1_2`, `K7_R1_2`) instead **dip to a
-minimum near 25% erasure and then recover all the way back to full detection by
-~45–50%**, holding it to the end. With most symbols blanked the surviving ones
-still pin down the narrow parity-check relations those codes rely on, so blind
-recovery comes back rather than failing — a genuine recovery, not the spurious
-self-satisfaction a degenerate check space would give.
+Erasures follow the same window ordering and simply collapse: the wide-window
+codes are gone below ~6%, `K7_R1_2` by ~10%, and `K3_R1_2` holds longest, fading
+to zero by ~42%. Detection then stays at zero — only a small residual blip
+appears near full erasure — so blind recovery degrades monotonically with erasure
+rate, with no rebound.
 
 ![detection probability vs flip rate](plots/detect_vs_flip.png)
 ![detection probability vs insert rate](plots/detect_vs_insert.png)

@@ -346,11 +346,11 @@ static const double LOCK_ERASE_RATES[] = {
  * the code's relation window n*(k+1) - the short-window codes (K3_R1_2 most of
  * all) stay detectable far longer, so the flip/insert/delete grids run well past
  * the long-window collapse to follow the short-window descent (to ~0.25-0.30).
- * Points pack into the early collapse and along that descent. Erasures are their
- * own shape: the long-window codes collapse below ~0.06, while the short-window
- * codes dip to a minimum near 0.28 and then recover all the way back to 1.0 by
- * ~0.55 and hold it - so that grid samples the early collapse, the dip, and the
- * recovery densely, with a sparse flat tail. */
+ * Points pack into the early collapse and along that descent. Erasures share that
+ * window ordering and just collapse monotonically: the long-window codes are gone
+ * below ~0.06 while K3_R1_2 holds out to ~0.42, all settling to zero with only a
+ * small residual blip near full erasure - so the grid is dense through the early
+ * collapse and K3's descent (to ~0.45), with a light flat tail to 0.92. */
 static const double DETECT_FLIP_RATES[] = {
     0, 0.0017, 0.0033, 0.005, 0.0067, 0.0083, 0.01, 0.0117, 0.0133, 0.015,
     0.0167, 0.0183, 0.02, 0.0233, 0.0267, 0.03, 0.0333, 0.0367, 0.04,
@@ -367,10 +367,10 @@ static const double DETECT_DELETE_RATES[] = {
     0.09, 0.1, 0.11, 0.12, 0.13, 0.14, 0.15, 0.16, 0.1733, 0.1867, 0.2,
     0.2167, 0.2333, 0.25};
 static const double DETECT_ERASE_RATES[] = {
-    0, 0.0033, 0.0067, 0.01, 0.0133, 0.0167, 0.02, 0.0267, 0.0333, 0.04,
-    0.0467, 0.0533, 0.06, 0.0733, 0.0867, 0.1, 0.12, 0.14, 0.16, 0.18, 0.2,
-    0.22, 0.24, 0.26, 0.28, 0.3067, 0.3333, 0.36, 0.39, 0.42, 0.45, 0.4833,
-    0.5167, 0.55, 0.6167, 0.6833, 0.75, 0.8067, 0.8633, 0.92};
+    0, 0.0033, 0.0067, 0.01, 0.0133, 0.0167, 0.02, 0.0233, 0.0267, 0.03,
+    0.0367, 0.0433, 0.05, 0.06, 0.07, 0.08, 0.0933, 0.1067, 0.12, 0.14,
+    0.16, 0.18, 0.2033, 0.2267, 0.25, 0.2833, 0.3167, 0.35, 0.3833, 0.4167,
+    0.45, 0.5167, 0.5833, 0.65, 0.7167, 0.7833, 0.85, 0.8733, 0.8967, 0.92};
 
 /* Look up the rate grid for a (metric, impairment) pair, with its length via
  * *count. Indexed [metric][axis]; GRID() pairs each array with its own length. */
