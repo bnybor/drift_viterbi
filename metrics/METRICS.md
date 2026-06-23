@@ -87,13 +87,17 @@ but would not reflect a real deployment that cannot know the channel in advance.
 Normalized edit distance between the decoded and sent bits — the core
 correctness metric. Every code holds near zero up to a per-code knee, then
 climbs; tolerance scales with redundancy, so `K5_R1_5` holds out the longest and
-the rate-1/2 codes turn up first. Because the decoder's model is pegged rather
-than matched to the channel, the codes degrade harder past their knees than a
-channel-aware decoder would. The per-coded-bit view divides each curve by its
-rate `n` (the fair cross-code comparison, since the x-axis is per coded bit) and
-widens the gaps without changing the ranking. Erasures, carrying no wrong
-information, are tolerated to far higher rates — knees near each code's `1 - rate`
-capacity limit.
+the rate-1/2 codes turn up first. On the flip axis the knee (first rate past 1%
+edit distance) sits near 1% for `K3_R1_2`, ~1.3% for `K7_R1_2`, ~2% for `K7_R1_3`
+and ~3.5% for `K5_R1_5`. Because the decoder's model is pegged rather than matched
+to the channel, the codes degrade harder past their knees than a channel-aware
+decoder would: by 25% flips every code is up around 0.29–0.32 edits per info bit.
+The per-coded-bit view divides each curve by its rate `n` (the fair cross-code
+comparison, since the x-axis is per coded bit) and widens the gaps without
+changing the ranking — at 25% flips `K5_R1_5` sits at ~0.06 against the rate-1/2
+codes' ~0.16. Erasures, carrying no wrong information, are tolerated to far higher
+rates — knees near each code's `1 - rate` capacity limit (~20% for `K3_R1_2`,
+rising to ~48% for `K5_R1_5`).
 
 Per info bit (payload delivered):
 
@@ -140,14 +144,17 @@ The decoder's own running confidence that it is tracking a valid coded stream,
 averaged over the kept bits. Because the model is pegged at 1% rather than
 matched to the channel, lock genuinely tracks the decoder being surprised: it
 falls from ~1.0 along a descent and settles onto a plateau as each impairment
-ramps, reflecting real loss of confidence rather than false comfort.
-The descent is where the structure lives (the plots sample it densely); past it
-the plateau is flat. Two endpoints are special: under deletion the stream empties
-out near 100% and lock collapses to zero, and under flips a rate near 100% is a
-*deterministic* inversion — structured again — so lock partly recovers. Erasures
-are a *known* unknown, so lock holds higher and longer before sliding to zero as
-the rate nears capacity. Lock is the decoder's confidence, not a correctness
-measure.
+ramps, reflecting real loss of confidence rather than false comfort. The plateau
+sits by redundancy — on the flip/insert/delete axes around 0.69 for `K7_R1_2`,
+0.61 for `K3_R1_2`, 0.52 for `K7_R1_3` and 0.33 for `K5_R1_5` (the strongest code
+spreads its few information bits thinnest, so a surprise dents its confidence
+most). The descent is where the structure lives (the plots sample it densely);
+past it the plateau is flat. Two endpoints are special: under deletion the stream
+empties out near 100% and lock collapses to zero, and under flips a rate near
+100% is a *deterministic* inversion — structured again — so lock partly recovers.
+Erasures are a *known* unknown, so lock holds higher and longer before sliding to
+zero as the rate nears capacity. Lock is the decoder's confidence, not a
+correctness measure.
 
 ![lock probability vs flip rate](plots/lock_vs_flip.png)
 ![lock probability vs insert rate](plots/lock_vs_insert.png)
@@ -167,11 +174,14 @@ ranking. The short-window codes (`K3_R1_2` most of all) therefore stay detectabl
 far longer, which is why the flip/insert/delete axes run out past 20% to follow
 their descent while the wide-window codes have long since collapsed.
 
-Erasures follow the same window ordering and simply collapse: the wide-window
-codes are gone below ~6%, `K7_R1_2` by ~10%, and `K3_R1_2` holds longest, fading
-to zero by ~42%. Detection then stays at zero — only a small residual blip
-appears near full erasure — so blind recovery degrades monotonically with erasure
-rate, with no rebound.
+Erasures follow the same window ordering and largely collapse: the wide-window
+codes (`K7_R1_3`, `K5_R1_5`) are gone below ~5%, `K7_R1_2` drops off by ~8%, and
+`K3_R1_2` holds longest — near 1.0 out to ~9%, then fading to zero by ~45%. Near
+total erasure a small **spurious rebound** appears, this time for the wide-window
+rate-1/3 and 1/5 codes (`K7_R1_3` reaches ~0.30, `K5_R1_5` ~0.11 at 92% erasure):
+with almost every symbol blanked the recovered parity-check space degenerates and
+trivially self-satisfies, so read that tail as a detector artifact, not a stream
+becoming detectable again.
 
 ![detection probability vs flip rate](plots/detect_vs_flip.png)
 ![detection probability vs insert rate](plots/detect_vs_insert.png)
