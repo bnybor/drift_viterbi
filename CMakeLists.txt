@@ -8,6 +8,16 @@ project(drift_viterbi
 option(DRIFT_VITERBI_BUILD_TESTS "Build the drift_viterbi tests" ${PROJECT_IS_TOP_LEVEL})
 option(DRIFT_VITERBI_BUILD_BENCH "Build the drift_viterbi metrics and code-search harnesses" OFF)
 
+# Size-focused flags for the MinSizeRel config (applied to the core and stdlib
+# below, since this precedes their targets). The library is plain C with no
+# exceptions, so the unwind tables (.eh_frame, ~17% of the object) and the
+# compiler .ident string are dead weight; dropping them shrinks the archive
+# notably. The trade-off is that debuggers/profilers cannot unwind through these
+# frames - acceptable for a minimum-size release build.
+add_compile_options($<$<CONFIG:MinSizeRel>:-fno-asynchronous-unwind-tables>
+                    $<$<CONFIG:MinSizeRel>:-fno-unwind-tables>
+                    $<$<CONFIG:MinSizeRel>:-fno-ident>)
+
 add_subdirectory(stdlib)
 
 add_library(drift_viterbi_interface INTERFACE)
@@ -62,10 +72,19 @@ function(dv_add_archive name)
     endforeach()
     if(CMAKE_LINKER AND CMAKE_OBJCOPY)
         set(_merged ${CMAKE_CURRENT_BINARY_DIR}/${name}_merged.o)
+        # In MinSizeRel, follow the localization with a strip of the local symbol
+        # names that survived the partial link only because relocations referenced
+        # them - they are dead weight in the archive. A separate pass so it runs
+        # after, not interleaved with, the localization.
+        set(_strip "")
+        if(CMAKE_BUILD_TYPE STREQUAL "MinSizeRel")
+            set(_strip COMMAND ${CMAKE_OBJCOPY} --strip-unneeded ${_merged})
+        endif()
         add_custom_command(
             OUTPUT ${_merged}
             COMMAND ${CMAKE_LINKER} -r -o ${_merged} ${_obj_exprs}
             COMMAND ${CMAKE_OBJCOPY} --keep-global-symbols=${_dv_keep_file} ${_merged}
+            ${_strip}
             DEPENDS ${ARGN} ${_dv_keep_file} ${_obj_exprs}
             COMMENT "Linking and localizing internal symbols for lib${name}.a"
             COMMAND_EXPAND_LISTS VERBATIM)
