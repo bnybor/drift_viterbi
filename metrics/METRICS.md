@@ -13,17 +13,36 @@ the other rates at zero, so each curve isolates one impairment.
 > whole remaining stream the way a position-by-position bit comparison would. A
 > clean decode scores 0; total failure approaches ~1 edit per info bit.
 
+The harness runs in three variations (see [Two variations](#two-variations) and
+[Detection](#detection) below). Two measure decoding performance — `matched`,
+where the decoder anticipates the channel, and `pegged`, where it does not — and
+the third, `detect`, measures blind detection, which uses no decoder model. They
+write to `metrics/tuned/`, `metrics/untuned/`, and `metrics/detect/`.
+
 ```sh
-# Build the harness (off by default) and run the sweep to CSV.
+# Build the harness (off by default) and run each variation to its own CSV.
 cmake -S . -B build -DDRIFT_VITERBI_BUILD_BENCH=ON
 cmake --build build --target dv_metrics
-build/metrics/dv_metrics > metrics/metrics.csv  # defaults: 12 trials, 4000 info bits
-# build/metrics/dv_metrics <trials> <info_bits> <seed>   # e.g. 3 1000 1 for a quick run
+# dv_metrics <trials> <info_bits> <seed> <variation=pegged|matched|detect>
+#   (defaults: 50 1000 0xC0FFEE pegged)
+build/metrics/dv_metrics 30 4000 0xC0FFEE matched > metrics/tuned/metrics.csv
+build/metrics/dv_metrics 30 4000 0xC0FFEE pegged  > metrics/untuned/metrics.csv
+build/metrics/dv_metrics 30 4000 0xC0FFEE detect  > metrics/detect/metrics.csv
 
-# Plot the mistake metric vs each channel rate (one curve per code). Needs matplotlib:
+# Plot the metrics each CSV carries (one curve per code). Needs matplotlib:
 python3 -m venv .venv && .venv/bin/pip install matplotlib
-.venv/bin/python metrics/plot_metrics.py metrics/metrics.csv -o metrics/plots/
+# --match shares each edit/runlen plot's y-axis across the pair (the larger
+# range wins) so the side-by-side untuned/tuned plots compare by eye directly.
+.venv/bin/python metrics/plot_metrics.py metrics/tuned/metrics.csv   -o metrics/tuned/plots/   --match metrics/untuned/metrics.csv
+.venv/bin/python metrics/plot_metrics.py metrics/untuned/metrics.csv -o metrics/untuned/plots/ --match metrics/tuned/metrics.csv
+.venv/bin/python metrics/plot_metrics.py metrics/detect/metrics.csv  -o metrics/detect/plots/ --metric detect
 ```
+
+All three share a `seed`, so a given (code, axis, rate) point sees the same
+channel realizations across variations. The two decoding variations sample
+different rate grids, though — each tuned to its own differently-shaped curves —
+so they line up only where their grids share a rate; the seed still makes every
+run reproducible.
 
 The default sweep takes a few minutes (the drift-tracking axes dominate); pass
 smaller `trials`/`info_bits` for a faster, coarser run. The sweep is fanned out
@@ -36,9 +55,9 @@ order-independent.
 
 By default the plotter writes, per axis, the four metrics below. The first two
 come in two units each —
-`plots/{edit,runlen}_vs_{flip,insert,delete,erase}_per_{info,coded}_bit.png` —
+`tuned/plots/{edit,runlen}_vs_{flip,insert,delete,erase}_per_{info,coded}_bit.png` —
 and the two probabilities are unitless, one plot per axis —
-`plots/{lock,detect}_vs_{flip,insert,delete,erase}.png`:
+`tuned/plots/{lock,detect}_vs_{flip,insert,delete,erase}.png`:
 
 - **edit** — edit distance per bit (mistakes per bit).
 - **runlen** — mean run length between edits (`1 / edit_rate`): the average bits
@@ -56,7 +75,39 @@ per-coded-bit view divides by the code's rate `n` so codes of different rates
 compare fairly. Run-length plots are linear with an adaptive y-cap (the low-rate
 spikes run off the top); pass `--logy` for a log axis or `--ymax N` to set the
 cap. Pass `--metric edit|runlength|lock|detect` or `--unit info|coded` to emit
-just one (`--unit` is ignored by the unitless lock/detect plots).
+just one (`--unit` is ignored by the unitless lock/detect plots). Pass
+`--match OTHER.csv` to size each edit/runlen plot's y-axis to whichever of the
+two CSVs has the larger range, so the side-by-side untuned/tuned plots below
+share a vertical scale and compare by eye (the lock/detect plots already do,
+fixed to `[0, 1]`).
+
+## Two variations
+
+The decoding metrics — edit distance, run length, lock — come in two variations
+that differ in the decoder's channel model: what the decoder believes about the
+impairment it is facing. The channel, codes, and seed are the same; the
+`dv_stream_params` probabilities the decoder is built with change, and because
+that reshapes the curves, each variation samples its **own rate grid** tuned to
+where its curves actually move.
+
+- **untuned** (`metrics/untuned/`, the `pegged` model) — every impairment
+  probability is pegged at a flat 1%, regardless of the rate actually being
+  swept, with drift tracking always on. The decoder is never told what the
+  channel is doing, so as a rate climbs it meets something increasingly
+  unexpected. This shows how the decoder handles **channels it cannot
+  anticipate**.
+- **tuned** (`metrics/tuned/`, the `matched` model) — the active impairment's
+  probability is set to the swept rate, and drift is tracked only when that
+  impairment is an insertion or deletion. The decoder's model matches the
+  channel at every point. This shows how the decoder handles **channels it can
+  anticipate** — its best case.
+
+The matched decoder always does at least as well; the gap is widest where a
+pegged probability is most wrong (high flip/indel rates, where the matched edit
+knees fall much later and matched lock barely dips) and narrowest for erasures,
+which carry no wrong information for either model to misjudge. Blind detection is
+neither — it uses no decoder model, lives in `metrics/detect/`, and is described
+under [Detection](#detection).
 
 ## Generated plots
 
@@ -70,17 +121,17 @@ The plots are grouped **by metric**, and each metric shows all four channel
 impairments — flip, insert, delete, erase — side by side, so you read one metric
 across the channels rather than one channel across the metrics. The swept rate
 range is tuned per metric and per impairment to the band where that curve
-actually moves, so the x-axes differ between plots: edit and run length run to
-~20% (to ~90% on erase, which is far more correctable); lock runs the full range
-to 100%; detection collapses so early that its axes stop within a few percent
-(plus a high-erasure tail for the rebound noted below).
+actually moves, so the x-axes differ between plots: for the untuned set, edit and
+run length run to ~20% (to ~90% on erase, which is far more correctable) and lock
+runs the full range to 100%. The tuned set uses its own grids — edit knees fall
+later, so it runs higher (~32%), and lock barely dips.
 
-One thing to keep in mind throughout: the decoder is held to a **fixed,
-channel-agnostic model** — every impairment pegged at 1%, regardless of the
-actual rate being swept. It is never told what the channel is doing. So as a rate
-climbs the decoder meets something increasingly unexpected, which is the stress
-these curves measure; a decoder tuned to each rate would look better than this
-but would not reflect a real deployment that cannot know the channel in advance.
+Each decoding metric below is shown as a table with the **untuned** (pegged-model)
+figure on the left and its **tuned** (matched-model) counterpart on the right —
+the same metric with the decoder unable to anticipate the channel (left) versus
+anticipating it (right). The captions describe the untuned (left) case, the
+harder one; see [Two variations](#two-variations) for how the tuned column
+differs. Detection has its own section after these.
 
 ### Edit distance (decoding mistakes per bit)
 
@@ -101,17 +152,21 @@ rising to ~48% for `K5_R1_5`).
 
 Per info bit (payload delivered):
 
-![edit distance per info bit vs flip rate](plots/edit_vs_flip_per_info_bit.png)
-![edit distance per info bit vs insert rate](plots/edit_vs_insert_per_info_bit.png)
-![edit distance per info bit vs delete rate](plots/edit_vs_delete_per_info_bit.png)
-![edit distance per info bit vs erase rate](plots/edit_vs_erase_per_info_bit.png)
+| Untuned — unanticipated channel | Tuned — anticipated channel |
+|---|---|
+| <img src="untuned/plots/edit_vs_flip_per_info_bit.png" alt="edit/info vs flip, untuned" width="420"> | <img src="tuned/plots/edit_vs_flip_per_info_bit.png" alt="edit/info vs flip, tuned" width="420"> |
+| <img src="untuned/plots/edit_vs_insert_per_info_bit.png" alt="edit/info vs insert, untuned" width="420"> | <img src="tuned/plots/edit_vs_insert_per_info_bit.png" alt="edit/info vs insert, tuned" width="420"> |
+| <img src="untuned/plots/edit_vs_delete_per_info_bit.png" alt="edit/info vs delete, untuned" width="420"> | <img src="tuned/plots/edit_vs_delete_per_info_bit.png" alt="edit/info vs delete, tuned" width="420"> |
+| <img src="untuned/plots/edit_vs_erase_per_info_bit.png" alt="edit/info vs erase, untuned" width="420"> | <img src="tuned/plots/edit_vs_erase_per_info_bit.png" alt="edit/info vs erase, tuned" width="420"> |
 
 Per coded bit (bits on the wire, each curve ÷ its rate `n`):
 
-![edit distance per coded bit vs flip rate](plots/edit_vs_flip_per_coded_bit.png)
-![edit distance per coded bit vs insert rate](plots/edit_vs_insert_per_coded_bit.png)
-![edit distance per coded bit vs delete rate](plots/edit_vs_delete_per_coded_bit.png)
-![edit distance per coded bit vs erase rate](plots/edit_vs_erase_per_coded_bit.png)
+| Untuned — unanticipated channel | Tuned — anticipated channel |
+|---|---|
+| <img src="untuned/plots/edit_vs_flip_per_coded_bit.png" alt="edit/coded vs flip, untuned" width="420"> | <img src="tuned/plots/edit_vs_flip_per_coded_bit.png" alt="edit/coded vs flip, tuned" width="420"> |
+| <img src="untuned/plots/edit_vs_insert_per_coded_bit.png" alt="edit/coded vs insert, untuned" width="420"> | <img src="tuned/plots/edit_vs_insert_per_coded_bit.png" alt="edit/coded vs insert, tuned" width="420"> |
+| <img src="untuned/plots/edit_vs_delete_per_coded_bit.png" alt="edit/coded vs delete, untuned" width="420"> | <img src="tuned/plots/edit_vs_delete_per_coded_bit.png" alt="edit/coded vs delete, tuned" width="420"> |
+| <img src="untuned/plots/edit_vs_erase_per_coded_bit.png" alt="edit/coded vs erase, untuned" width="420"> | <img src="tuned/plots/edit_vs_erase_per_coded_bit.png" alt="edit/coded vs erase, tuned" width="420"> |
 
 ### Run length between edits
 
@@ -126,17 +181,21 @@ derived from it.
 
 Per info bit:
 
-![mean info bits between edits vs flip rate](plots/runlen_vs_flip_per_info_bit.png)
-![mean info bits between edits vs insert rate](plots/runlen_vs_insert_per_info_bit.png)
-![mean info bits between edits vs delete rate](plots/runlen_vs_delete_per_info_bit.png)
-![mean info bits between edits vs erase rate](plots/runlen_vs_erase_per_info_bit.png)
+| Untuned — unanticipated channel | Tuned — anticipated channel |
+|---|---|
+| <img src="untuned/plots/runlen_vs_flip_per_info_bit.png" alt="runlen/info vs flip, untuned" width="420"> | <img src="tuned/plots/runlen_vs_flip_per_info_bit.png" alt="runlen/info vs flip, tuned" width="420"> |
+| <img src="untuned/plots/runlen_vs_insert_per_info_bit.png" alt="runlen/info vs insert, untuned" width="420"> | <img src="tuned/plots/runlen_vs_insert_per_info_bit.png" alt="runlen/info vs insert, tuned" width="420"> |
+| <img src="untuned/plots/runlen_vs_delete_per_info_bit.png" alt="runlen/info vs delete, untuned" width="420"> | <img src="tuned/plots/runlen_vs_delete_per_info_bit.png" alt="runlen/info vs delete, tuned" width="420"> |
+| <img src="untuned/plots/runlen_vs_erase_per_info_bit.png" alt="runlen/info vs erase, untuned" width="420"> | <img src="tuned/plots/runlen_vs_erase_per_info_bit.png" alt="runlen/info vs erase, tuned" width="420"> |
 
 Per coded bit (`n`× larger; identical cliff positions):
 
-![mean coded bits between edits vs flip rate](plots/runlen_vs_flip_per_coded_bit.png)
-![mean coded bits between edits vs insert rate](plots/runlen_vs_insert_per_coded_bit.png)
-![mean coded bits between edits vs delete rate](plots/runlen_vs_delete_per_coded_bit.png)
-![mean coded bits between edits vs erase rate](plots/runlen_vs_erase_per_coded_bit.png)
+| Untuned — unanticipated channel | Tuned — anticipated channel |
+|---|---|
+| <img src="untuned/plots/runlen_vs_flip_per_coded_bit.png" alt="runlen/coded vs flip, untuned" width="420"> | <img src="tuned/plots/runlen_vs_flip_per_coded_bit.png" alt="runlen/coded vs flip, tuned" width="420"> |
+| <img src="untuned/plots/runlen_vs_insert_per_coded_bit.png" alt="runlen/coded vs insert, untuned" width="420"> | <img src="tuned/plots/runlen_vs_insert_per_coded_bit.png" alt="runlen/coded vs insert, tuned" width="420"> |
+| <img src="untuned/plots/runlen_vs_delete_per_coded_bit.png" alt="runlen/coded vs delete, untuned" width="420"> | <img src="tuned/plots/runlen_vs_delete_per_coded_bit.png" alt="runlen/coded vs delete, tuned" width="420"> |
+| <img src="untuned/plots/runlen_vs_erase_per_coded_bit.png" alt="runlen/coded vs erase, untuned" width="420"> | <img src="tuned/plots/runlen_vs_erase_per_coded_bit.png" alt="runlen/coded vs erase, tuned" width="420"> |
 
 ### Lock probability
 
@@ -156,12 +215,17 @@ Erasures are a *known* unknown, so lock holds higher and longer before sliding t
 zero as the rate nears capacity. Lock is the decoder's confidence, not a
 correctness measure.
 
-![lock probability vs flip rate](plots/lock_vs_flip.png)
-![lock probability vs insert rate](plots/lock_vs_insert.png)
-![lock probability vs delete rate](plots/lock_vs_delete.png)
-![lock probability vs erase rate](plots/lock_vs_erase.png)
+| Untuned — unanticipated channel | Tuned — anticipated channel |
+|---|---|
+| <img src="untuned/plots/lock_vs_flip.png" alt="lock vs flip, untuned" width="420"> | <img src="tuned/plots/lock_vs_flip.png" alt="lock vs flip, tuned" width="420"> |
+| <img src="untuned/plots/lock_vs_insert.png" alt="lock vs insert, untuned" width="420"> | <img src="tuned/plots/lock_vs_insert.png" alt="lock vs insert, tuned" width="420"> |
+| <img src="untuned/plots/lock_vs_delete.png" alt="lock vs delete, untuned" width="420"> | <img src="tuned/plots/lock_vs_delete.png" alt="lock vs delete, tuned" width="420"> |
+| <img src="untuned/plots/lock_vs_erase.png" alt="lock vs erase, untuned" width="420"> | <img src="tuned/plots/lock_vs_erase.png" alt="lock vs erase, tuned" width="420"> |
 
-### Detection probability
+## Detection
+
+Detection stands apart from the two decoding variations: it uses no decoder
+model, so it is computed once and lives in `metrics/detect/`, shared by both.
 
 `dv_detect`'s blind confidence that the received buffer still carries *any*
 rate-1/n, constraint-length-k code, knowing neither the generators nor the sent
@@ -183,7 +247,7 @@ with almost every symbol blanked the recovered parity-check space degenerates an
 trivially self-satisfies, so read that tail as a detector artifact, not a stream
 becoming detectable again.
 
-![detection probability vs flip rate](plots/detect_vs_flip.png)
-![detection probability vs insert rate](plots/detect_vs_insert.png)
-![detection probability vs delete rate](plots/detect_vs_delete.png)
-![detection probability vs erase rate](plots/detect_vs_erase.png)
+<img src="detect/plots/detect_vs_flip.png" alt="detection probability vs flip rate" width="600">
+<img src="detect/plots/detect_vs_insert.png" alt="detection probability vs insert rate" width="600">
+<img src="detect/plots/detect_vs_delete.png" alt="detection probability vs delete rate" width="600">
+<img src="detect/plots/detect_vs_erase.png" alt="detection probability vs erase rate" width="600">
