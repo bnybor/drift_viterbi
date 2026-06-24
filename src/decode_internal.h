@@ -65,12 +65,27 @@
 #endif
 
 /* Backpointer for one node: where it came from (prev_state, prev_drift_index)
- * and the input bit that got there. */
-typedef struct {
-  int prev_state;
-  int prev_drift_index;
-  unsigned char bit;
-} dv_backpointer;
+ * and the input bit that got there, packed into one 32-bit word to shrink the
+ * backpointer ring (~3x vs a struct) and make each forward-pass write a single
+ * store. Layout: bit:1 | prev_drift_index:15 | prev_state:16. The field widths
+ * dwarf the validated ranges (dv_code_create caps K <= 9, so prev_state < 256;
+ * dv_trellis_init guards prev_drift_index/prev_state against overflow). */
+typedef uint32_t dv_backpointer;
+
+static inline dv_backpointer dv_bp_pack(int prev_state, int prev_drift_index,
+                                        unsigned int bit) {
+  return (bit & 1u) | ((unsigned int)prev_drift_index << 1) |
+         ((unsigned int)prev_state << 16);
+}
+static inline unsigned int dv_bp_bit(dv_backpointer b) { return b & 1u; }
+static inline int dv_bp_drift(dv_backpointer b) {
+  return (int)((b >> 1) & 0x7FFFu);
+}
+static inline int dv_bp_state(dv_backpointer b) { return (int)(b >> 16); }
+
+/* Field capacities for the packing above (used by dv_trellis_init's guard). */
+#define DV_BP_MAX_STATE 0xFFFF
+#define DV_BP_MAX_DRIFT 0x7FFF
 
 /* Shared decode context: received buffer, cadence, channel constants, and
  * trellis dimensions - all identical across codes decoded together. */
@@ -100,6 +115,22 @@ typedef struct {
   dv_backpointer *backpointers; /* [decision_depth*num_states*drift_width]   */
   double *alignment;            /* [(n+1)*(n+2*max_drift+1)] DP scratch      */
   double smoothed_cost;         /* EWMA of best-path per-step cost           */
+
+  /* Per-code constants and per-step scratch for the grouped forward pass.
+   * An edge's alignment DP depends only on its n-bit output group (<= 2^n
+   * distinct) and source drift, not on the state - so each step computes one
+   * final row per (group, source drift) and the scatter just looks it up,
+   * instead of re-running the DP for every (state, drift, bit). */
+  int n_groups;                   /* distinct n-bit output groups in `code`  */
+  int *group_of;                  /* [2*num_states] (state*2+bit)->group     */
+  const uint8_t **group_expected; /* [n_groups] one output row per group     */
+  double *align_final;            /* [n_groups*drift_width*(max_consume+1)]  */
+  /* Per-step received-window match costs, indexed by position - match_lo:
+   * cost of aligning an expected 0/1 bit there, with in_range gating the ends. */
+  double *match_cost0;            /* [n+4*max_drift] expected-bit-0 costs     */
+  double *match_cost1;            /* [n+4*max_drift] expected-bit-1 costs     */
+  signed char *in_range;          /* [n+4*max_drift] 1 if position buffered   */
+  int match_lo;                   /* absolute received index of position 0    */
 } dv_trellis;
 
 /* Validate `params`, take dimensions from `code`, allocate the shared buffers,

@@ -161,39 +161,70 @@ static void align_fill(const dv_decode_ctx *ctx, dv_trellis *tr,
                        const uint8_t *expected, int base) {
   const int n = ctx->n, max_consume = ctx->n + 2 * ctx->max_drift,
             stride = max_consume + 1;
+  /* The per-bit match cost and in-range gate for each received position are
+   * precomputed once per step (fill_match_costs) and shared by every align_fill;
+   * `off` maps this edge's read base into that table. The arithmetic below is
+   * identical to deriving them per cell. */
+  const int off = base - tr->match_lo;
+  const signed char *in_range = tr->in_range;
+  const double *match_cost0 = tr->match_cost0, *match_cost1 = tr->match_cost1;
+  const double cost_ins = ctx->cost_ins, cost_del = ctx->cost_del;
   double *cost_table = tr->alignment;
 
   cost_table[0] = 0.0;
   for (int consumed = 1; consumed <= max_consume; ++consumed) {
-    const int buffer_index = base + consumed - 1;
-    cost_table[consumed] =
-        (buffer_index >= 0 && buffer_index < ctx->received_length)
-            ? cost_table[consumed - 1] + ctx->cost_ins
-            : INFINITY;
+    cost_table[consumed] = in_range[off + consumed - 1]
+                               ? cost_table[consumed - 1] + cost_ins
+                               : INFINITY;
   }
   for (int j = 1; j <= n; ++j) {
     double *cost_row = cost_table + (size_t)j * stride;
     const double *prev_row = cost_table + (size_t)(j - 1) * stride;
+    const double *match_cost = expected[j - 1] ? match_cost1 : match_cost0;
     cost_row[0] =
-        prev_row[0] + ctx->cost_del; /* delete expected[j-1], consume nothing */
+        prev_row[0] + cost_del; /* delete expected[j-1], consume nothing */
     for (int consumed = 1; consumed <= max_consume; ++consumed) {
-      double best =
-          prev_row[consumed] + ctx->cost_del; /* deletion always avail. */
-      const int buffer_index = base + consumed - 1;
-      if (buffer_index >= 0 && buffer_index < ctx->received_length) {
-        const uint8_t received_bit = ctx->received[buffer_index];
-        const double match_cost =
-            ctx->cost_keep + (received_bit == DV_ERASURE       ? ctx->cost_erase
-                              : received_bit == expected[j - 1] ? ctx->cost_match
-                                                                : ctx->cost_miss);
+      double best = prev_row[consumed] + cost_del; /* deletion always avail. */
+      const int position = off + consumed - 1;
+      if (in_range[position]) {
         const double align_cost =
-            prev_row[consumed - 1] + match_cost; /* match / substitute */
+            prev_row[consumed - 1] + match_cost[position]; /* match / sub */
         const double insert_cost =
-            cost_row[consumed - 1] + ctx->cost_ins; /* extra received bit */
+            cost_row[consumed - 1] + cost_ins; /* extra received bit */
         if (align_cost < best) best = align_cost;
         if (insert_cost < best) best = insert_cost;
       }
       cost_row[consumed] = best;
+    }
+  }
+}
+
+/* Precompute the step's received-window match costs once, shared by every
+ * align_fill this step (they all read the same buffer with the same channel
+ * cost constants). Position p maps to absolute received index match_lo + p;
+ * match_cost{0,1}[p] is the cost of aligning an expected 0/1 bit there (an erased
+ * bit costs cost_erase either way), and in_range[p] gates positions off the ends
+ * of the buffer (where only deletion is available - see align_fill). The window
+ * spans every (source drift, consumed) an edge can touch: n + 4*max_drift wide. */
+static void fill_match_costs(dv_decode_ctx *ctx, dv_trellis *tr) {
+  const int window = ctx->n + 4 * ctx->max_drift;
+  const double keep = ctx->cost_keep, match = ctx->cost_match,
+               miss = ctx->cost_miss, erase = ctx->cost_erase;
+  tr->match_lo = ctx->read_base - ctx->max_drift;
+  for (int p = 0; p < window; ++p) {
+    const int absolute = tr->match_lo + p;
+    if (absolute >= 0 && absolute < ctx->received_length) {
+      const uint8_t received_bit = ctx->received[absolute];
+      if (received_bit == DV_ERASURE) {
+        tr->match_cost0[p] = keep + erase;
+        tr->match_cost1[p] = keep + erase;
+      } else {
+        tr->match_cost0[p] = keep + (received_bit == 0 ? match : miss);
+        tr->match_cost1[p] = keep + (received_bit == 1 ? match : miss);
+      }
+      tr->in_range[p] = 1;
+    } else {
+      tr->in_range[p] = 0;
     }
   }
 }
@@ -259,6 +290,7 @@ static void forward_pass(dv_decode_ctx *ctx, dv_trellis *tr) {
   const size_t count = (size_t)num_states * drift_width;
   const int max_consume =
       ctx->n + 2 * ctx->max_drift; /* most received bits a branch can consume */
+  const int stride = max_consume + 1;
 
   for (size_t i = 0; i < count; ++i) {
     tr->next_metric[i] = INFINITY;
@@ -266,45 +298,69 @@ static void forward_pass(dv_decode_ctx *ctx, dv_trellis *tr) {
   dv_backpointer *layer =
       tr->backpointers + (size_t)(ctx->steps % ctx->decision_depth) * count;
 
-  /* For every live node, try both input bits; the bit-level alignment DP then
-   * spreads cost to every reachable ending drift in one pass. */
+  /* An edge's alignment DP depends only on its output group and source drift, so
+   * compute the final row once per (group, source drift) - at most 2^n groups
+   * instead of 2*num_states (state, bit) pairs - and let the scatter look it up.
+   * Source drifts with no live node are skipped: the scatter never reads their
+   * rows (it skips dead nodes), so this is exact and also cuts acquisition. */
+  fill_match_costs(ctx, tr);
+  for (int drift_index = 0; drift_index < drift_width; ++drift_index) {
+    int live = 0;
+    for (int state = 0; state < num_states; ++state) {
+      if (tr->metric[(size_t)state * drift_width + drift_index] != INFINITY) {
+        live = 1;
+        break;
+      }
+    }
+    if (!live) {
+      continue;
+    }
+    const int base = ctx->read_base + (drift_index - max_drift);
+    for (int g = 0; g < tr->n_groups; ++g) {
+      align_fill(ctx, tr, tr->group_expected[g], base);
+      dv_memcpy(
+          tr->align_final + ((size_t)g * drift_width + drift_index) * stride,
+          tr->alignment + (size_t)n * stride, (size_t)stride * sizeof(double));
+    }
+  }
+
+  /* Scatter. The node/edge iteration order (state, drift, bit, ending drift) is
+   * the same as the per-edge form, so the `<` tie-break keeps the same first
+   * equal-cost edge and the decoded bits are identical. */
   for (int state = 0; state < num_states; ++state) {
+    const size_t source_row = (size_t)state * drift_width;
     for (int drift_index = 0; drift_index < drift_width; ++drift_index) {
-      const double current_cost =
-          tr->metric[node_at(state, drift_index, drift_width)];
+      const double current_cost = tr->metric[source_row + drift_index];
       if (current_cost == INFINITY) {
         continue;
       }
-      const int base = ctx->read_base + (drift_index - max_drift);
-
+      /* Ending drift next_drift_index consumes n + (next_drift_index -
+       * drift_index) bits; that must stay in [0, max_consume]. The high end is
+       * always satisfied (next_drift_index <= drift_width-1 = 2*max_drift), so
+       * only the low bound clamps the loop start. */
+      int first = drift_index - n;
+      if (first < 0) {
+        first = 0;
+      }
       for (int bit = 0; bit <= 1; ++bit) {
-        const int next_state = code->next_state[state * 2 + bit];
-        const uint8_t *expected =
-            &code->output[((size_t)(state * 2 + bit)) * n];
-        align_fill(ctx, tr, expected, base);
-        const double *final_row = tr->alignment + (size_t)n * (max_consume + 1);
-
-        /* Ending drift next_drift_index consumes n + (next_drift_index -
-         * drift_index) received bits; final_row holds that consumption's cost.
-         */
-        for (int next_drift_index = 0; next_drift_index < drift_width;
+        const int edge = state * 2 + bit;
+        const int next_state = code->next_state[edge];
+        const double *final_row =
+            tr->align_final +
+            ((size_t)tr->group_of[edge] * drift_width + drift_index) * stride;
+        const size_t dest_row = (size_t)next_state * drift_width;
+        for (int next_drift_index = first; next_drift_index < drift_width;
              ++next_drift_index) {
-          const int consumed = n + (next_drift_index - drift_index);
-          if (consumed < 0 || consumed > max_consume) {
-            continue;
-          }
-          const double branch_cost = final_row[consumed];
+          const double branch_cost = final_row[n + (next_drift_index - drift_index)];
           if (branch_cost == INFINITY) {
             continue;
           }
           const double cost = current_cost + branch_cost;
-          const size_t destination =
-              node_at(next_state, next_drift_index, drift_width);
+          const size_t destination = dest_row + next_drift_index;
           if (cost < tr->next_metric[destination]) {
             tr->next_metric[destination] = cost;
-            layer[destination].prev_state = state;
-            layer[destination].prev_drift_index = drift_index;
-            layer[destination].bit = (unsigned char)bit;
+            layer[destination] =
+                dv_bp_pack(state, drift_index, (unsigned int)bit);
           }
         }
       }
@@ -312,6 +368,65 @@ static void forward_pass(dv_decode_ctx *ctx, dv_trellis *tr) {
   }
 
   const double increment = normalize(tr->next_metric, count);
+  const double alpha = 2.0 / (ctx->decision_depth + 1.0);
+  tr->smoothed_cost += alpha * (increment - tr->smoothed_cost);
+
+  double *temp = tr->metric;
+  tr->metric = tr->next_metric;
+  tr->next_metric = temp;
+}
+
+/* Fast path for max_drift == 0 with indels disabled (cost_ins == cost_del ==
+ * +inf, i.e. p_ins == p_del == 0). The drift window is one wide and the
+ * alignment is forced diagonal, so an edge's cost is just the sum of its n
+ * per-bit match costs - a plain Viterbi butterfly with no alignment DP and no
+ * drift loops. This yields exactly the general path's branch cost (final_row[n])
+ * in the same (state, bit) order, so output is identical. */
+static void forward_pass_nodrift(dv_decode_ctx *ctx, dv_trellis *tr) {
+  const dv_code *code = tr->code;
+  const int n = ctx->n, num_states = ctx->num_states;
+  const int base = ctx->read_base;
+  const int in_range = base >= 0 && base + n <= ctx->received_length;
+  const double keep_total = (double)n * ctx->cost_keep;
+
+  for (int state = 0; state < num_states; ++state) {
+    tr->next_metric[state] = INFINITY;
+  }
+  dv_backpointer *layer =
+      tr->backpointers +
+      (size_t)(ctx->steps % ctx->decision_depth) * (size_t)num_states;
+
+  for (int state = 0; state < num_states; ++state) {
+    const double current_cost = tr->metric[state];
+    if (current_cost == INFINITY) {
+      continue;
+    }
+    for (int bit = 0; bit <= 1; ++bit) {
+      const int edge = state * 2 + bit;
+      double branch_cost = INFINITY;
+      if (in_range) {
+        const uint8_t *expected = &code->output[(size_t)edge * n];
+        branch_cost = keep_total;
+        for (int j = 0; j < n; ++j) {
+          const uint8_t received_bit = ctx->received[base + j];
+          branch_cost += received_bit == DV_ERASURE       ? ctx->cost_erase
+                         : received_bit == expected[j]     ? ctx->cost_match
+                                                           : ctx->cost_miss;
+        }
+      }
+      if (branch_cost == INFINITY) {
+        continue;
+      }
+      const double cost = current_cost + branch_cost;
+      const int next_state = code->next_state[edge];
+      if (cost < tr->next_metric[next_state]) {
+        tr->next_metric[next_state] = cost;
+        layer[next_state] = dv_bp_pack(state, 0, (unsigned int)bit);
+      }
+    }
+  }
+
+  const double increment = normalize(tr->next_metric, (size_t)num_states);
   const double alpha = 2.0 / (ctx->decision_depth + 1.0);
   tr->smoothed_cost += alpha * (increment - tr->smoothed_cost);
 
@@ -342,8 +457,16 @@ void dv_decode_step(dv_decode_ctx *ctx, dv_trellis *trs, size_t n) {
   }
   ctx->shift[ctx->steps % ctx->decision_depth] = sigma;
 
+  /* With no drift window and indels disabled the alignment is forced diagonal;
+   * a dedicated butterfly skips the DP entirely (identical result). */
+  const int nodrift = ctx->max_drift == 0 && ctx->cost_ins == INFINITY &&
+                      ctx->cost_del == INFINITY;
   for (size_t j = 0; j < n; ++j) {
-    forward_pass(ctx, &trs[j]);
+    if (nodrift) {
+      forward_pass_nodrift(ctx, &trs[j]);
+    } else {
+      forward_pass(ctx, &trs[j]);
+    }
   }
 
   ctx->steps++;
@@ -370,15 +493,15 @@ unsigned char dv_trellis_trace(const dv_decode_ctx *ctx, const dv_trellis *tr,
         tr->backpointers + (size_t)(i % ctx->decision_depth) * count;
     const dv_backpointer entry = layer[node];
     if (i == target) {
-      bit = entry.bit;
+      bit = (unsigned char)dv_bp_bit(entry);
       break;
     }
     const int prev_drift_index =
-        entry.prev_drift_index + ctx->shift[i % ctx->decision_depth];
+        dv_bp_drift(entry) + ctx->shift[i % ctx->decision_depth];
     /* In-bounds by construction: reanchor_metric empties the slot that would
      * translate out of the window, so it is never a recorded predecessor. */
     DV_ASSERT(prev_drift_index >= 0 && prev_drift_index < ctx->drift_width);
-    node = entry.prev_state * ctx->drift_width + prev_drift_index;
+    node = dv_bp_state(entry) * ctx->drift_width + prev_drift_index;
   }
   return bit;
 }
@@ -550,18 +673,69 @@ int dv_trellis_init(dv_trellis *tr, const dv_decode_ctx *ctx,
   if (!tr || !ctx || !code) {
     return DV_ERR_ARG;
   }
+  /* The packed backpointer (decode_internal.h) carries prev_state in 16 bits and
+   * prev_drift_index in 15. dv_code_create caps K (num_states <= 256) and real
+   * max_drift is tiny, but guard the packing invariant rather than silently
+   * truncating. */
+  if (ctx->num_states - 1 > DV_BP_MAX_STATE ||
+      ctx->drift_width - 1 > DV_BP_MAX_DRIFT) {
+    return DV_ERR_ARG;
+  }
   tr->code = code;
   tr->smoothed_cost =
       ctx->expected_unlock; /* assume unlocked until the stream proves it */
 
   const size_t count = (size_t)ctx->num_states * ctx->drift_width;
+  const int max_consume = ctx->n + 2 * ctx->max_drift;
+  const int window = ctx->n + 4 * ctx->max_drift; /* match-cost table width */
+  const int edges = ctx->num_states * 2;
   tr->metric = dv_malloc(count * sizeof(double));
   tr->next_metric = dv_malloc(count * sizeof(double));
   tr->backpointers =
       dv_malloc((size_t)ctx->decision_depth * count * sizeof(dv_backpointer));
-  tr->alignment = dv_malloc((size_t)(ctx->n + 1) *
-                            (ctx->n + 2 * ctx->max_drift + 1) * sizeof(double));
-  if (!tr->metric || !tr->next_metric || !tr->backpointers || !tr->alignment) {
+  tr->alignment =
+      dv_malloc((size_t)(ctx->n + 1) * (max_consume + 1) * sizeof(double));
+  tr->group_of = dv_malloc((size_t)edges * sizeof(int));
+  tr->group_expected = dv_malloc((size_t)edges * sizeof(const uint8_t *));
+  tr->match_cost0 = dv_malloc((size_t)window * sizeof(double));
+  tr->match_cost1 = dv_malloc((size_t)window * sizeof(double));
+  tr->in_range = dv_malloc((size_t)window * sizeof(signed char));
+  if (!tr->metric || !tr->next_metric || !tr->backpointers || !tr->alignment ||
+      !tr->group_of || !tr->group_expected || !tr->match_cost0 ||
+      !tr->match_cost1 || !tr->in_range) {
+    dv_trellis_free(tr);
+    return DV_ERR_ALLOC;
+  }
+
+  /* Map each (state, bit) edge to its distinct n-bit output group, keeping one
+   * representative output row per group for the per-step alignment precompute. */
+  tr->n_groups = 0;
+  for (int edge = 0; edge < edges; ++edge) {
+    const uint8_t *row = &code->output[(size_t)edge * ctx->n];
+    int found = -1;
+    for (int g = 0; g < tr->n_groups; ++g) {
+      int same = 1;
+      for (int j = 0; j < ctx->n; ++j) {
+        if (tr->group_expected[g][j] != row[j]) {
+          same = 0;
+          break;
+        }
+      }
+      if (same) {
+        found = g;
+        break;
+      }
+    }
+    if (found < 0) {
+      found = tr->n_groups;
+      tr->group_expected[tr->n_groups++] = row;
+    }
+    tr->group_of[edge] = found;
+  }
+
+  tr->align_final = dv_malloc((size_t)tr->n_groups * ctx->drift_width *
+                              (max_consume + 1) * sizeof(double));
+  if (!tr->align_final) {
     dv_trellis_free(tr);
     return DV_ERR_ALLOC;
   }
@@ -578,10 +752,22 @@ void dv_trellis_free(dv_trellis *tr) {
   dv_free(tr->next_metric);
   dv_free(tr->backpointers);
   dv_free(tr->alignment);
+  dv_free(tr->group_of);
+  dv_free(tr->group_expected);
+  dv_free(tr->align_final);
+  dv_free(tr->match_cost0);
+  dv_free(tr->match_cost1);
+  dv_free(tr->in_range);
   tr->metric = NULL;
   tr->next_metric = NULL;
   tr->backpointers = NULL;
   tr->alignment = NULL;
+  tr->group_of = NULL;
+  tr->group_expected = NULL;
+  tr->align_final = NULL;
+  tr->match_cost0 = NULL;
+  tr->match_cost1 = NULL;
+  tr->in_range = NULL;
 }
 
 int dv_decode_feed(dv_decode_ctx *ctx, const uint8_t *in, int n_in) {
