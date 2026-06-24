@@ -302,222 +302,110 @@ static const char *METRIC_NAME[] = {"edit", "lock", "detect"};
  * is computed once, shared by all. */
 typedef enum { VAR_PEGGED, VAR_MATCHED, VAR_DETECT, VAR_OVERMATCHED } variation;
 
-/* Channel rate grids, one per (metric, impairment) pair. Each is sampled only
- * over the range where the metric carries information on that axis, and within
- * that range the points are clustered where the curve bends - where its slope is
- * changing fastest (the knee onset, the steepest stretch, the rollover) - and
- * thinned across the near-straight runs and flat plateaus. The bend locations
- * below were read off the curvature of the coarse sweep, so the grids differ by
- * both metric and axis. Each grid then subdivides its intervals threefold for
- * resolution, which keeps that bend-weighted spacing (dense stays dense).
- *
- * EDIT (and run length, derived from it): the error-correction knee. Points bunch
- * around the onset and the steep middle (~0.02-0.12 for flip/insert/delete) and
- * stretch out over the gentler tail to ~0.25 where the strongest code saturates.
- * Erasures bend much later, so that grid skips the flat floor below ~0.2 and
- * concentrates on the 0.35-0.92 knee. */
-static const double EDIT_FLIP_RATES[] = {
-    0, 0.0033, 0.0067, 0.01, 0.0133, 0.0167, 0.02, 0.025, 0.03, 0.035,
-    0.04, 0.045, 0.05, 0.0567, 0.0633, 0.07, 0.0767, 0.0833, 0.09, 0.1,
-    0.11, 0.12, 0.1333, 0.1467, 0.16, 0.1733, 0.1867, 0.2, 0.2167, 0.2333,
-    0.25};
-static const double EDIT_INSERT_RATES[] = {
-    0, 0.0017, 0.0033, 0.005, 0.0067, 0.0083, 0.01, 0.0133, 0.0167, 0.02,
-    0.025, 0.03, 0.035, 0.04, 0.045, 0.05, 0.0567, 0.0633, 0.07, 0.08,
-    0.09, 0.1, 0.1133, 0.1267, 0.14, 0.16, 0.18, 0.2, 0.2167, 0.2333, 0.25};
-static const double EDIT_DELETE_RATES[] = {
-    0, 0.0033, 0.0067, 0.01, 0.0133, 0.0167, 0.02, 0.0233, 0.0267, 0.03,
-    0.0367, 0.0433, 0.05, 0.0567, 0.0633, 0.07, 0.0767, 0.0833, 0.09, 0.1,
-    0.11, 0.12, 0.1333, 0.1467, 0.16, 0.1733, 0.1867, 0.2, 0.2167, 0.2333,
-    0.25};
-static const double EDIT_ERASE_RATES[] = {
-    0, 0.0667, 0.1333, 0.2, 0.25, 0.3, 0.35, 0.3833, 0.4167, 0.45, 0.4833,
-    0.5167, 0.55, 0.5733, 0.5967, 0.62, 0.6467, 0.6733, 0.7, 0.7267,
-    0.7533, 0.78, 0.8033, 0.8267, 0.85, 0.8733, 0.8967, 0.92};
-
-/* LOCK: confidence falls from ~1 to a plateau over the descent (the bends live at
- * the onset and through ~0.02-0.2), then runs flat. Points bunch on the descent
- * and thin across the plateau out to 1.0. Delete is the exception - it bends
- * hard again at 0.9-1.0 as the stream empties out, so points re-cluster there.
- * Erase confidence collapses to zero by ~0.4, with its steepest bend near 0.2. */
-static const double LOCK_FLIP_RATES[] = {
-    0, 0.0033, 0.0067, 0.01, 0.0133, 0.0167, 0.02, 0.025, 0.03, 0.035,
-    0.04, 0.045, 0.05, 0.0567, 0.0633, 0.07, 0.0767, 0.0833, 0.09, 0.1,
-    0.11, 0.12, 0.1333, 0.1467, 0.16, 0.1733, 0.1867, 0.2, 0.2167, 0.2333,
-    0.25, 0.2833, 0.3167, 0.35, 0.4167, 0.4833, 0.55, 0.6333, 0.7167, 0.8,
-    0.8667, 0.9333, 1};
-static const double LOCK_INSERT_RATES[] = {
-    0, 0.0033, 0.0067, 0.01, 0.0133, 0.0167, 0.02, 0.025, 0.03, 0.035,
-    0.04, 0.045, 0.05, 0.0567, 0.0633, 0.07, 0.0767, 0.0833, 0.09, 0.1,
-    0.11, 0.12, 0.1333, 0.1467, 0.16, 0.1733, 0.1867, 0.2, 0.22, 0.24,
-    0.26, 0.29, 0.32, 0.35, 0.4167, 0.4833, 0.55, 0.6333, 0.7167, 0.8,
-    0.8667, 0.9333, 1};
-static const double LOCK_DELETE_RATES[] = {
-    0, 0.0033, 0.0067, 0.01, 0.0133, 0.0167, 0.02, 0.025, 0.03, 0.035,
-    0.04, 0.045, 0.05, 0.0567, 0.0633, 0.07, 0.0767, 0.0833, 0.09, 0.1,
-    0.11, 0.12, 0.1333, 0.1467, 0.16, 0.1733, 0.1867, 0.2, 0.2333, 0.2667,
-    0.3, 0.3667, 0.4333, 0.5, 0.6, 0.7, 0.8, 0.8333, 0.8667, 0.9, 0.9167,
-    0.9333, 0.95, 0.9667, 0.9833, 1};
-static const double LOCK_ERASE_RATES[] = {
-    0, 0.0067, 0.0133, 0.02, 0.0267, 0.0333, 0.04, 0.05, 0.06, 0.07, 0.08,
-    0.09, 0.1, 0.11, 0.12, 0.13, 0.14, 0.15, 0.16, 0.17, 0.18, 0.19, 0.2,
-    0.21, 0.22, 0.2333, 0.2467, 0.26, 0.2733, 0.2867, 0.3, 0.32, 0.34,
-    0.36, 0.4067, 0.4533, 0.5, 0.6667, 0.8333, 1};
-
-/* DETECT: blind detection falls from 1 to 0, but how far that reaches depends on
- * the code's relation window n*(k+1) - the short-window codes (K3_R1_2 most of
- * all) stay detectable far longer, so the flip/insert/delete grids run well past
- * the long-window collapse to follow the short-window descent (to ~0.25-0.30).
- * Points pack into the early collapse and along that descent. Erasures share that
- * window ordering and just collapse monotonically: the long-window codes are gone
- * below ~0.06 while K3_R1_2 holds out to ~0.42, all settling to zero with only a
- * small residual blip near full erasure - so the grid is dense through the early
- * collapse and K3's descent (to ~0.45), with a light flat tail to 0.92. */
-static const double DETECT_FLIP_RATES[] = {
-    0, 0.0017, 0.0033, 0.005, 0.0067, 0.0083, 0.01, 0.0117, 0.0133, 0.015,
-    0.0167, 0.0183, 0.02, 0.0233, 0.0267, 0.03, 0.0333, 0.0367, 0.04,
-    0.0467, 0.0533, 0.06, 0.07, 0.08, 0.09, 0.1033, 0.1167, 0.13, 0.1467,
-    0.1633, 0.18, 0.2033, 0.2267, 0.25};
-static const double DETECT_INSERT_RATES[] = {
-    0, 0.0017, 0.0033, 0.005, 0.0067, 0.0083, 0.01, 0.0133, 0.0167, 0.02,
-    0.0233, 0.0267, 0.03, 0.035, 0.04, 0.045, 0.05, 0.055, 0.06, 0.0667,
-    0.0733, 0.08, 0.09, 0.1, 0.11, 0.1267, 0.1433, 0.16, 0.18, 0.2, 0.22,
-    0.2467, 0.2733, 0.3};
-static const double DETECT_DELETE_RATES[] = {
-    0, 0.0017, 0.0033, 0.005, 0.0067, 0.0083, 0.01, 0.0133, 0.0167, 0.02,
-    0.0233, 0.0267, 0.03, 0.0367, 0.0433, 0.05, 0.0567, 0.0633, 0.07, 0.08,
-    0.09, 0.1, 0.11, 0.12, 0.13, 0.14, 0.15, 0.16, 0.1733, 0.1867, 0.2,
-    0.2167, 0.2333, 0.25};
-static const double DETECT_ERASE_RATES[] = {
-    0, 0.0033, 0.0067, 0.01, 0.0133, 0.0167, 0.02, 0.0233, 0.0267, 0.03,
-    0.0367, 0.0433, 0.05, 0.06, 0.07, 0.08, 0.0933, 0.1067, 0.12, 0.14,
-    0.16, 0.18, 0.2033, 0.2267, 0.25, 0.2833, 0.3167, 0.35, 0.3833, 0.4167,
-    0.45, 0.5167, 0.5833, 0.65, 0.7167, 0.7833, 0.85, 0.8733, 0.8967, 0.92};
-
-/* The matched variation's edit and lock grids. The matched decoder anticipates
- * the channel, so its curves differ from the pegged ones and need their own
- * sampling: edit knees fall much later and the curves climb past the pegged top
- * edge, so the dense band shifts right and runs higher; lock barely dips (the
- * decoder is not surprised), so the deep-descent sampling the pegged grids spend
- * is replaced by a shallow dip plus a sparse flat tail. Detect is model-agnostic,
- * so it has no matched variant - the matched table reuses the detect grids. */
-static const double EDIT_FLIP_RATES_M[] = {
-    0, 0.0133, 0.0267, 0.04, 0.0467, 0.0533, 0.06, 0.0667, 0.0733, 0.08,
-    0.0867, 0.0933, 0.1, 0.11, 0.12, 0.13, 0.14, 0.15, 0.16, 0.1733,
-    0.1867, 0.2, 0.2167, 0.2333, 0.25, 0.2733, 0.2967, 0.32};
-static const double EDIT_INSERT_RATES_M[] = {
-    0, 0.0133, 0.0267, 0.04, 0.0467, 0.0533, 0.06, 0.0667, 0.0733, 0.08,
-    0.09, 0.1, 0.11, 0.12, 0.13, 0.14, 0.1533, 0.1667, 0.18, 0.1933,
-    0.2067, 0.22, 0.2367, 0.2533, 0.27, 0.2867, 0.3033, 0.32};
-static const double EDIT_DELETE_RATES_M[] = {
-    0, 0.0067, 0.0133, 0.02, 0.0267, 0.0333, 0.04, 0.0467, 0.0533, 0.06,
-    0.0667, 0.0733, 0.08, 0.09, 0.1, 0.11, 0.12, 0.13, 0.14, 0.1533,
-    0.1667, 0.18, 0.1967, 0.2133, 0.23, 0.26, 0.29, 0.32};
-static const double EDIT_ERASE_RATES_M[] = {
-    0, 0.1, 0.2, 0.3, 0.34, 0.38, 0.42, 0.4467, 0.4733, 0.5, 0.5267,
-    0.5533, 0.58, 0.6033, 0.6267, 0.65, 0.6733, 0.6967, 0.72, 0.7433,
-    0.7667, 0.79, 0.8133, 0.8367, 0.86, 0.88, 0.9, 0.92};
-static const double LOCK_FLIP_RATES_M[] = {
-    0, 0.0133, 0.0267, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.1, 0.1133,
-    0.1267, 0.14, 0.16, 0.18, 0.2, 0.25, 0.3, 0.35, 0.5667, 0.7833, 1};
-static const double LOCK_INSERT_RATES_M[] = {
-    0, 0.0133, 0.0267, 0.04, 0.0533, 0.0667, 0.08, 0.0967, 0.1133, 0.13,
-    0.15, 0.17, 0.19, 0.2133, 0.2367, 0.26, 0.2867, 0.3133, 0.34, 0.3767,
-    0.4133, 0.45, 0.5167, 0.5833, 0.65, 0.7667, 0.8833, 1};
-static const double LOCK_DELETE_RATES_M[] = {
-    0, 0.0133, 0.0267, 0.04, 0.0533, 0.0667, 0.08, 0.0967, 0.1133, 0.13,
-    0.15, 0.17, 0.19, 0.2267, 0.2633, 0.3, 0.3667, 0.4333, 0.5, 0.6, 0.7,
-    0.8, 0.8333, 0.8667, 0.9, 0.9167, 0.9333, 0.95, 0.9667, 0.9833, 1};
-static const double LOCK_ERASE_RATES_M[] = {
-    0, 0.02, 0.04, 0.06, 0.09, 0.12, 0.15, 0.1933, 0.2367, 0.28, 0.3367,
-    0.3933, 0.45, 0.5167, 0.5833, 0.65, 0.7167, 0.7833, 0.85, 0.9, 0.95, 1};
-
-/* The overmatched variation runs a clean channel against the matched decoder
- * model, so the swept rate is what the decoder *expects*, not what it meets. On
- * clean data the decoder copes until its expectation gets extreme, so the
- * breakdown sits far above the matched knees and these grids run almost to 1.
- * The shapes (read off a coarse sweep): flip/delete edit hold at 0 until the
- * model inverts at expected rate 0.5 - where match/miss (or keep/indel) costs
- * cross - then jump to a confidently-wrong plateau; flip lock dips to 0 only at
- * that 0.5 singularity (plus a gradual decline near 1 for the high-redundancy
- * codes); erase lock holds at 1 then collapses across ~0.55-0.70; and insert
- * (both metrics), delete lock, and erase edit are flat - expecting absent
- * impairments costs nothing on a clean stream. Grids are dense at the 0.5 step
- * and the erase collapse, sparse on the flat axes. */
-static const double OM_EDIT_STEP[] = { /* flip & delete edit: step at 0.5 */
-    0, 0.1, 0.2, 0.3, 0.4, 0.45, 0.47, 0.48, 0.49, 0.5, 0.51, 0.52, 0.53,
-    0.55, 0.58, 0.62, 0.67, 0.72, 0.78, 0.85, 0.92, 0.97};
-static const double OM_FLAT[] = { /* no effect on a clean channel */
-    0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.97};
-static const double OM_LOCK_FLIP[] = { /* dip at 0.5, high-redundancy tail */
-    0, 0.1, 0.2, 0.3, 0.4, 0.47, 0.49, 0.5, 0.51, 0.53, 0.6, 0.7, 0.78,
-    0.82, 0.85, 0.88, 0.9, 0.92, 0.94, 0.95, 0.96, 0.97};
-static const double OM_LOCK_ERASE[] = { /* confidence collapse ~0.55-0.70 */
-    0, 0.1, 0.2, 0.3, 0.4, 0.45, 0.5, 0.5333, 0.5667, 0.6, 0.6333, 0.6667,
-    0.7, 0.7333, 0.7667, 0.8, 0.85, 0.9, 0.97};
-
-/* Look up the rate grid for a (variation, metric, impairment), with its length
- * via *count. Detect grids are shared, so both decoding tables carry the same
- * detect entry; the variation picks the pegged or matched table for edit/lock.
- * GRID() pairs each array with its own length. */
+/* Channel rate grids - one per (variation, metric, impairment) - are read at
+ * startup from a text file (load_grids; default metrics/rate_grids.txt) rather
+ * than hard-coded, so a sweep can be retuned without recompiling. Each grid is
+ * sampled only over the range where its metric carries information on that axis,
+ * with points clustered where the curve bends; the shipped file documents the
+ * shapes. */
 typedef struct {
-  const double *rates;
+  double *rates;
   int count;
 } rate_grid;
-#define GRID(arr) {(arr), (int)(sizeof(arr) / sizeof((arr)[0]))}
-static const rate_grid GRIDS_PEGGED[N_METRICS][N_AXES] = {
-    [METRIC_EDIT] = {[AXIS_FLIP] = GRID(EDIT_FLIP_RATES),
-                     [AXIS_INSERT] = GRID(EDIT_INSERT_RATES),
-                     [AXIS_DELETE] = GRID(EDIT_DELETE_RATES),
-                     [AXIS_ERASE] = GRID(EDIT_ERASE_RATES)},
-    [METRIC_LOCK] = {[AXIS_FLIP] = GRID(LOCK_FLIP_RATES),
-                     [AXIS_INSERT] = GRID(LOCK_INSERT_RATES),
-                     [AXIS_DELETE] = GRID(LOCK_DELETE_RATES),
-                     [AXIS_ERASE] = GRID(LOCK_ERASE_RATES)},
-    [METRIC_DETECT] = {[AXIS_FLIP] = GRID(DETECT_FLIP_RATES),
-                       [AXIS_INSERT] = GRID(DETECT_INSERT_RATES),
-                       [AXIS_DELETE] = GRID(DETECT_DELETE_RATES),
-                       [AXIS_ERASE] = GRID(DETECT_ERASE_RATES)},
-};
-static const rate_grid GRIDS_MATCHED[N_METRICS][N_AXES] = {
-    [METRIC_EDIT] = {[AXIS_FLIP] = GRID(EDIT_FLIP_RATES_M),
-                     [AXIS_INSERT] = GRID(EDIT_INSERT_RATES_M),
-                     [AXIS_DELETE] = GRID(EDIT_DELETE_RATES_M),
-                     [AXIS_ERASE] = GRID(EDIT_ERASE_RATES_M)},
-    [METRIC_LOCK] = {[AXIS_FLIP] = GRID(LOCK_FLIP_RATES_M),
-                     [AXIS_INSERT] = GRID(LOCK_INSERT_RATES_M),
-                     [AXIS_DELETE] = GRID(LOCK_DELETE_RATES_M),
-                     [AXIS_ERASE] = GRID(LOCK_ERASE_RATES_M)},
-    [METRIC_DETECT] = {[AXIS_FLIP] = GRID(DETECT_FLIP_RATES),
-                       [AXIS_INSERT] = GRID(DETECT_INSERT_RATES),
-                       [AXIS_DELETE] = GRID(DETECT_DELETE_RATES),
-                       [AXIS_ERASE] = GRID(DETECT_ERASE_RATES)},
-};
-/* overmatched's edit/lock grids run near to 1, sampled per axis for the shapes
- * described above; detect is never run for this variation, so its entry just
- * mirrors the shared grids. */
-static const rate_grid GRIDS_OVERMATCHED[N_METRICS][N_AXES] = {
-    [METRIC_EDIT] = {[AXIS_FLIP] = GRID(OM_EDIT_STEP),
-                     [AXIS_INSERT] = GRID(OM_FLAT),
-                     [AXIS_DELETE] = GRID(OM_EDIT_STEP),
-                     [AXIS_ERASE] = GRID(OM_FLAT)},
-    [METRIC_LOCK] = {[AXIS_FLIP] = GRID(OM_LOCK_FLIP),
-                     [AXIS_INSERT] = GRID(OM_FLAT),
-                     [AXIS_DELETE] = GRID(OM_FLAT),
-                     [AXIS_ERASE] = GRID(OM_LOCK_ERASE)},
-    [METRIC_DETECT] = {[AXIS_FLIP] = GRID(DETECT_FLIP_RATES),
-                       [AXIS_INSERT] = GRID(DETECT_INSERT_RATES),
-                       [AXIS_DELETE] = GRID(DETECT_DELETE_RATES),
-                       [AXIS_ERASE] = GRID(DETECT_ERASE_RATES)},
-};
-#undef GRID
+
+#define N_VARIATIONS (VAR_OVERMATCHED + 1)
+static rate_grid g_grids[N_VARIATIONS][N_METRICS][N_AXES];
+
+/* Index of `name` in `names` (length n), or -1 if absent. */
+static int name_index(const char *name, const char *const *names, int n) {
+  for (int i = 0; i < n; ++i) {
+    if (strcmp(name, names[i]) == 0) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+/* Map a variation name (canonical, or the untuned/tuned aliases) to its enum, or
+ * -1 if unrecognised. Shared by load_grids and the command-line parsing. */
+static int parse_variation(const char *s) {
+  if (strcmp(s, "pegged") == 0 || strcmp(s, "untuned") == 0) return VAR_PEGGED;
+  if (strcmp(s, "matched") == 0 || strcmp(s, "tuned") == 0) return VAR_MATCHED;
+  if (strcmp(s, "overmatched") == 0) return VAR_OVERMATCHED;
+  if (strcmp(s, "detect") == 0) return VAR_DETECT;
+  return -1;
+}
+
+/* Load the rate grids from `path` into g_grids. Each non-blank, non-comment line
+ * is "<variation> <metric> <axis>  <rate> <rate> ..."; '#' begins a comment.
+ * Returns 0 on success, -1 after printing a diagnostic. */
+static int load_grids(const char *path) {
+  FILE *f = fopen(path, "r");
+  if (!f) {
+    fprintf(stderr, "dv_metrics: cannot open rate-grid file '%s'\n", path);
+    return -1;
+  }
+  char line[8192];
+  int lineno = 0, ok = 1;
+  while (ok && fgets(line, sizeof(line), f)) {
+    ++lineno;
+    char *hash = strchr(line, '#');
+    if (hash) *hash = '\0';
+    char *first = strtok(line, " \t\r\n");
+    if (!first) continue; /* blank or comment-only line */
+    const char *mn = strtok(NULL, " \t\r\n");
+    const char *an = strtok(NULL, " \t\r\n");
+    int v = parse_variation(first);
+    int m = mn ? name_index(mn, METRIC_NAME, N_METRICS) : -1;
+    int a = an ? name_index(an, AXIS_NAME, N_AXES) : -1;
+    if (v < 0 || m < 0 || a < 0) {
+      fprintf(stderr, "dv_metrics: %s:%d: bad variation/metric/axis\n", path,
+              lineno);
+      ok = 0;
+      break;
+    }
+    int cap = 16, n = 0;
+    double *rates = xmalloc((size_t)cap * sizeof(double));
+    for (char *t = strtok(NULL, " \t\r\n"); t; t = strtok(NULL, " \t\r\n")) {
+      char *end;
+      double value = strtod(t, &end);
+      if (*end != '\0') {
+        fprintf(stderr, "dv_metrics: %s:%d: bad rate '%s'\n", path, lineno, t);
+        ok = 0;
+        break;
+      }
+      if (n == cap) {
+        cap *= 2;
+        double *grown = realloc(rates, (size_t)cap * sizeof(double));
+        if (!grown) {
+          fprintf(stderr, "dv_metrics: out of memory\n");
+          exit(1);
+        }
+        rates = grown;
+      }
+      rates[n++] = value;
+    }
+    if (!ok) {
+      free(rates);
+      break;
+    }
+    if (n == 0) {
+      fprintf(stderr, "dv_metrics: %s:%d: grid has no rates\n", path, lineno);
+      free(rates);
+      ok = 0;
+      break;
+    }
+    free(g_grids[v][m][a].rates); /* last definition wins */
+    g_grids[v][m][a].rates = rates;
+    g_grids[v][m][a].count = n;
+  }
+  fclose(f);
+  return ok ? 0 : -1;
+}
 
 static const double *metric_axis_rates(variation var, metric which_metric,
                                        axis channel_axis, int *count) {
-  const rate_grid (*table)[N_AXES] = var == VAR_OVERMATCHED ? GRIDS_OVERMATCHED
-                                     : var == VAR_MATCHED    ? GRIDS_MATCHED
-                                                             : GRIDS_PEGGED;
-  const rate_grid *g = &table[which_metric][channel_axis];
+  const rate_grid *g = &g_grids[var][which_metric][channel_axis];
   *count = g->count;
   return g->rates;
 }
@@ -775,7 +663,7 @@ int main(int argc, char **argv) {
   if (trials < 1 || info_bits < 1) {
     fprintf(stderr,
             "usage: %s [trials>=1] [info_bits>=1] [seed] "
-            "[variation=pegged|matched|overmatched|detect]\n",
+            "[variation=pegged|matched|overmatched|detect] [rate_grids_file]\n",
             argv[0]);
     return 2;
   }
@@ -785,22 +673,22 @@ int main(int argc, char **argv) {
    * accept the untuned/tuned aliases. */
   variation var = VAR_PEGGED;
   if (argc > 4) {
-    if (strcmp(argv[4], "matched") == 0 || strcmp(argv[4], "tuned") == 0) {
-      var = VAR_MATCHED;
-    } else if (strcmp(argv[4], "pegged") == 0 ||
-               strcmp(argv[4], "untuned") == 0) {
-      var = VAR_PEGGED;
-    } else if (strcmp(argv[4], "overmatched") == 0) {
-      var = VAR_OVERMATCHED;
-    } else if (strcmp(argv[4], "detect") == 0) {
-      var = VAR_DETECT;
-    } else {
+    int parsed = parse_variation(argv[4]);
+    if (parsed < 0) {
       fprintf(stderr,
               "dv_metrics: unknown variation '%s' "
               "(use pegged|matched|overmatched|detect)\n",
               argv[4]);
       return 2;
     }
+    var = (variation)parsed;
+  }
+
+  /* Channel rate grids are read from a file (default metrics/rate_grids.txt,
+   * overridden by a 5th argument) so a sweep can be retuned without recompiling. */
+  const char *grids_path = argc > 5 ? argv[5] : "metrics/rate_grids.txt";
+  if (load_grids(grids_path) < 0) {
+    return 2;
   }
 
   /* Metrics for this variation: the decoding variations measure edit and lock;
@@ -831,6 +719,12 @@ int main(int argc, char **argv) {
     for (int axis_idx = 0; axis_idx < n_axes; ++axis_idx) {
       int count;
       metric_axis_rates(var, run_metrics[mi], (axis)axis_idx, &count);
+      if (count == 0) {
+        fprintf(stderr, "dv_metrics: %s: no grid for %s %s %s\n", grids_path,
+                argc > 4 ? argv[4] : "pegged", METRIC_NAME[run_metrics[mi]],
+                AXIS_NAME[axis_idx]);
+        return 2;
+      }
       n_points += N_CODES * count;
     }
   }

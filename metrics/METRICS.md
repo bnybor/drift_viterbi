@@ -25,8 +25,9 @@ They write to `metrics/tuned/`, `metrics/untuned/`, `metrics/overmatched/`, and
 # Build the harness (off by default) and run each variation to its own CSV.
 cmake -S . -B build -DDRIFT_VITERBI_BUILD_BENCH=ON
 cmake --build build --target dv_metrics
-# dv_metrics <trials> <info_bits> <seed> <variation=pegged|matched|overmatched|detect>
-#   (defaults: 50 1000 0xC0FFEE pegged)
+# dv_metrics <trials> <info_bits> <seed> <variation> <rate_grids_file>
+#   variation = pegged|matched|overmatched|detect   (defaults: 50 1000 0xC0FFEE pegged)
+#   rate_grids_file defaults to metrics/rate_grids.txt (so run from the repo root)
 build/metrics/dv_metrics 30 4000 0xC0FFEE matched     > metrics/tuned/metrics.csv
 build/metrics/dv_metrics 30 4000 0xC0FFEE pegged      > metrics/untuned/metrics.csv
 build/metrics/dv_metrics 30 4000 0xC0FFEE overmatched > metrics/overmatched/metrics.csv
@@ -50,6 +51,13 @@ message. The decoding variations sample different rate grids — each tuned to i
 own differently-shaped curves (and `overmatched`'s swept rate is the decoder's
 expectation, not a channel rate) — so they line up only where their grids share a
 rate.
+
+The sweep's rate grids are not compiled in: `dv_metrics` reads them at startup
+from a plain-text file (`metrics/rate_grids.txt` by default, or a path passed as
+the 5th argument). Each line is `<variation> <metric> <axis>  <rate> <rate> ...`
+(`#` begins a comment), so you can retune which rates a curve samples — densify a
+knee, extend a tail, add points — by editing that file and re-running, with no
+rebuild. The shipped file reproduces the grids these plots were made with.
 
 The default sweep takes a few minutes (the drift-tracking axes dominate); pass
 smaller `trials`/`info_bits` for a faster, coarser run. The sweep is fanned out
