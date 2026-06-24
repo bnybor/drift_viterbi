@@ -110,7 +110,19 @@ def y_value(metric, per_coded, info_rate, n):
     return (n if per_coded else 1) / info_rate
 
 
-def plot_axis(axis, by_code, outdir, metric, unit, logy, ymax):
+def collect_ys(by_code, metric, per_coded):
+    """Every defined y-value across all codes for one (metric, unit), used to size
+    a shared y-axis against a peer CSV."""
+    ys = []
+    for entry in by_code.values():
+        for _r, ir in entry["edit"]:
+            y = y_value(metric, per_coded, ir, entry["n"])
+            if y is not None:
+                ys.append(y)
+    return ys
+
+
+def plot_axis(axis, by_code, outdir, metric, unit, logy, ymax, peer_ys=None):
     per_coded = unit == "coded"
     ylabel = LABELS[(metric, per_coded)]
     fig, ax = plt.subplots(figsize=(7, 5))
@@ -137,14 +149,29 @@ def plot_axis(axis, by_code, outdir, metric, unit, logy, ymax):
 
     # Cap the y-axis so a few near-vertical low-rate spikes don't flatten the
     # readable range. Default (run length only): clip linearly at the 75th
-    # percentile, adapting to the info/coded scale; --ymax overrides.
+    # percentile, adapting to the info/coded scale; --ymax overrides. With a peer
+    # CSV (--match) the top is widened to whichever side has the larger range, so
+    # the paired untuned/tuned plots share a vertical scale for direct comparison.
     cap = None
+    matched = False
     if not logy:
         ax.set_ylim(bottom=0)
         if ymax is not None:
             cap = ymax
         elif metric == "runlength":
-            cap = percentile(all_ys, 75)
+            # Both sides cap at their own 75th percentile; the pair takes the
+            # larger so neither curve is clipped relative to the other.
+            caps = [c for c in (percentile(all_ys, 75),
+                                percentile(peer_ys, 75) if peer_ys else None)
+                    if c is not None]
+            cap = max(caps) if caps else None
+            matched = peer_ys is not None and cap is not None
+        elif peer_ys is not None:
+            # edit: autoscaled per CSV by default; pin the top to the larger of
+            # the two data ranges (+5% margin, matching matplotlib's autoscale).
+            combined = all_ys + peer_ys
+            cap = max(combined) * 1.05 if combined else None
+            matched = cap is not None
         if cap:
             ax.set_ylim(top=cap)
 
@@ -159,7 +186,8 @@ def plot_axis(axis, by_code, outdir, metric, unit, logy, ymax):
     if dropped:
         notes.append(f"{dropped} zero-edit points dropped")
     if cap:
-        notes.append(f"y capped at {cap:.0f}")
+        notes.append(f"y {'matched to peer' if matched else 'capped'} at "
+                     f"{cap:.4g}")
     note = f"  ({'; '.join(notes)})" if notes else ""
     print(f"wrote {out}{note}")
 
@@ -224,23 +252,32 @@ def main():
                     help="cap the linear y-axis at this value (default: run "
                     "length auto-caps at the 75th percentile so low-rate spikes "
                     "don't flatten the plot)")
+    ap.add_argument("--match", metavar="PEER.csv", default=None,
+                    help="match each edit/runlength plot's y-axis to whichever of "
+                    "this CSV or the peer has the larger range, so paired "
+                    "untuned/tuned plots share a vertical scale (ignored by the "
+                    "unitless lock/detect plots and overridden by --ymax)")
     args = ap.parse_args()
 
     os.makedirs(args.outdir, exist_ok=True)
     series = load(args.csv)
     if not series:
         raise SystemExit("no rows found in CSV")
+    peer_series = load(args.match) if args.match else None
     metrics = (["edit", "runlength", "lock", "detect"] if args.metric == "all"
                else [args.metric])
     units = ["info", "coded"] if args.unit == "both" else [args.unit]
     for axis, by_code in series.items():
+        peer_by_code = peer_series.get(axis) if peer_series else None
         for metric in metrics:
             if metric in PROB_METRICS:
                 plot_prob_axis(axis, by_code, args.outdir, metric)
                 continue
             for unit in units:
+                peer_ys = (collect_ys(peer_by_code, metric, unit == "coded")
+                           if peer_by_code else None)
                 plot_axis(axis, by_code, args.outdir, metric, unit, args.logy,
-                          args.ymax)
+                          args.ymax, peer_ys)
 
 
 if __name__ == "__main__":

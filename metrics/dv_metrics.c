@@ -69,6 +69,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -107,6 +108,13 @@ static void *xmalloc(size_t size) {
     exit(1);
   }
   return ptr;
+}
+
+/* Clamp a probability into [lo, hi]. The decoder needs every rate strictly inside
+ * (0, 1), so the matched model floors them above 0 and caps the active one below
+ * 1 at the top of a sweep. */
+static double clamp_double(double value, double lo, double hi) {
+  return value < lo ? lo : (value > hi ? hi : value);
 }
 
 /* Push a received buffer through the streaming decoder in small chunks, then
@@ -280,6 +288,16 @@ typedef enum { METRIC_EDIT, METRIC_LOCK, METRIC_DETECT } metric;
 static const char *METRIC_NAME[] = {"edit", "lock", "detect"};
 #define N_METRICS ((int)(sizeof(METRIC_NAME) / sizeof(METRIC_NAME[0])))
 
+/* What a run measures, selected by the command-line argument. The two decoding
+ * variations measure edit and lock with a decoder whose channel model is either
+ * pegged (every probability fixed at 1%, the channel met cold - the decoder
+ * cannot anticipate it) or matched (the active impairment's probability set to
+ * the swept rate - the decoder anticipates the channel); they use different rate
+ * grids, tuned to their differently-shaped curves. The detect variation measures
+ * blind detection, which uses no decoder model and so is computed once, shared by
+ * both. */
+typedef enum { VAR_PEGGED, VAR_MATCHED, VAR_DETECT } variation;
+
 /* Channel rate grids, one per (metric, impairment) pair. Each is sampled only
  * over the range where the metric carries information on that axis, and within
  * that range the points are clustered where the curve bends - where its slope is
@@ -372,14 +390,54 @@ static const double DETECT_ERASE_RATES[] = {
     0.16, 0.18, 0.2033, 0.2267, 0.25, 0.2833, 0.3167, 0.35, 0.3833, 0.4167,
     0.45, 0.5167, 0.5833, 0.65, 0.7167, 0.7833, 0.85, 0.8733, 0.8967, 0.92};
 
-/* Look up the rate grid for a (metric, impairment) pair, with its length via
- * *count. Indexed [metric][axis]; GRID() pairs each array with its own length. */
+/* The matched variation's edit and lock grids. The matched decoder anticipates
+ * the channel, so its curves differ from the pegged ones and need their own
+ * sampling: edit knees fall much later and the curves climb past the pegged top
+ * edge, so the dense band shifts right and runs higher; lock barely dips (the
+ * decoder is not surprised), so the deep-descent sampling the pegged grids spend
+ * is replaced by a shallow dip plus a sparse flat tail. Detect is model-agnostic,
+ * so it has no matched variant - the matched table reuses the detect grids. */
+static const double EDIT_FLIP_RATES_M[] = {
+    0, 0.0133, 0.0267, 0.04, 0.0467, 0.0533, 0.06, 0.0667, 0.0733, 0.08,
+    0.0867, 0.0933, 0.1, 0.11, 0.12, 0.13, 0.14, 0.15, 0.16, 0.1733,
+    0.1867, 0.2, 0.2167, 0.2333, 0.25, 0.2733, 0.2967, 0.32};
+static const double EDIT_INSERT_RATES_M[] = {
+    0, 0.0133, 0.0267, 0.04, 0.0467, 0.0533, 0.06, 0.0667, 0.0733, 0.08,
+    0.09, 0.1, 0.11, 0.12, 0.13, 0.14, 0.1533, 0.1667, 0.18, 0.1933,
+    0.2067, 0.22, 0.2367, 0.2533, 0.27, 0.2867, 0.3033, 0.32};
+static const double EDIT_DELETE_RATES_M[] = {
+    0, 0.0067, 0.0133, 0.02, 0.0267, 0.0333, 0.04, 0.0467, 0.0533, 0.06,
+    0.0667, 0.0733, 0.08, 0.09, 0.1, 0.11, 0.12, 0.13, 0.14, 0.1533,
+    0.1667, 0.18, 0.1967, 0.2133, 0.23, 0.26, 0.29, 0.32};
+static const double EDIT_ERASE_RATES_M[] = {
+    0, 0.1, 0.2, 0.3, 0.34, 0.38, 0.42, 0.4467, 0.4733, 0.5, 0.5267,
+    0.5533, 0.58, 0.6033, 0.6267, 0.65, 0.6733, 0.6967, 0.72, 0.7433,
+    0.7667, 0.79, 0.8133, 0.8367, 0.86, 0.88, 0.9, 0.92};
+static const double LOCK_FLIP_RATES_M[] = {
+    0, 0.0133, 0.0267, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.1, 0.1133,
+    0.1267, 0.14, 0.16, 0.18, 0.2, 0.25, 0.3, 0.35, 0.5667, 0.7833, 1};
+static const double LOCK_INSERT_RATES_M[] = {
+    0, 0.0133, 0.0267, 0.04, 0.0533, 0.0667, 0.08, 0.0967, 0.1133, 0.13,
+    0.15, 0.17, 0.19, 0.2133, 0.2367, 0.26, 0.2867, 0.3133, 0.34, 0.3767,
+    0.4133, 0.45, 0.5167, 0.5833, 0.65, 0.7667, 0.8833, 1};
+static const double LOCK_DELETE_RATES_M[] = {
+    0, 0.0133, 0.0267, 0.04, 0.0533, 0.0667, 0.08, 0.0967, 0.1133, 0.13,
+    0.15, 0.17, 0.19, 0.2267, 0.2633, 0.3, 0.3667, 0.4333, 0.5, 0.6, 0.7,
+    0.8, 0.8333, 0.8667, 0.9, 0.9167, 0.9333, 0.95, 0.9667, 0.9833, 1};
+static const double LOCK_ERASE_RATES_M[] = {
+    0, 0.02, 0.04, 0.06, 0.09, 0.12, 0.15, 0.1933, 0.2367, 0.28, 0.3367,
+    0.3933, 0.45, 0.5167, 0.5833, 0.65, 0.7167, 0.7833, 0.85, 0.9, 0.95, 1};
+
+/* Look up the rate grid for a (variation, metric, impairment), with its length
+ * via *count. Detect grids are shared, so both decoding tables carry the same
+ * detect entry; the variation picks the pegged or matched table for edit/lock.
+ * GRID() pairs each array with its own length. */
 typedef struct {
   const double *rates;
   int count;
 } rate_grid;
 #define GRID(arr) {(arr), (int)(sizeof(arr) / sizeof((arr)[0]))}
-static const rate_grid GRIDS[N_METRICS][N_AXES] = {
+static const rate_grid GRIDS_PEGGED[N_METRICS][N_AXES] = {
     [METRIC_EDIT] = {[AXIS_FLIP] = GRID(EDIT_FLIP_RATES),
                      [AXIS_INSERT] = GRID(EDIT_INSERT_RATES),
                      [AXIS_DELETE] = GRID(EDIT_DELETE_RATES),
@@ -393,18 +451,34 @@ static const rate_grid GRIDS[N_METRICS][N_AXES] = {
                        [AXIS_DELETE] = GRID(DETECT_DELETE_RATES),
                        [AXIS_ERASE] = GRID(DETECT_ERASE_RATES)},
 };
+static const rate_grid GRIDS_MATCHED[N_METRICS][N_AXES] = {
+    [METRIC_EDIT] = {[AXIS_FLIP] = GRID(EDIT_FLIP_RATES_M),
+                     [AXIS_INSERT] = GRID(EDIT_INSERT_RATES_M),
+                     [AXIS_DELETE] = GRID(EDIT_DELETE_RATES_M),
+                     [AXIS_ERASE] = GRID(EDIT_ERASE_RATES_M)},
+    [METRIC_LOCK] = {[AXIS_FLIP] = GRID(LOCK_FLIP_RATES_M),
+                     [AXIS_INSERT] = GRID(LOCK_INSERT_RATES_M),
+                     [AXIS_DELETE] = GRID(LOCK_DELETE_RATES_M),
+                     [AXIS_ERASE] = GRID(LOCK_ERASE_RATES_M)},
+    [METRIC_DETECT] = {[AXIS_FLIP] = GRID(DETECT_FLIP_RATES),
+                       [AXIS_INSERT] = GRID(DETECT_INSERT_RATES),
+                       [AXIS_DELETE] = GRID(DETECT_DELETE_RATES),
+                       [AXIS_ERASE] = GRID(DETECT_ERASE_RATES)},
+};
 #undef GRID
 
-static const double *metric_axis_rates(metric which_metric, axis channel_axis,
-                                       int *count) {
-  const rate_grid *g = &GRIDS[which_metric][channel_axis];
+static const double *metric_axis_rates(variation var, metric which_metric,
+                                       axis channel_axis, int *count) {
+  const rate_grid (*table)[N_AXES] =
+      var == VAR_MATCHED ? GRIDS_MATCHED : GRIDS_PEGGED;
+  const rate_grid *g = &table[which_metric][channel_axis];
   *count = g->count;
   return g->rates;
 }
 
-/* The decoder model and measurement windows for a code - fixed by the code
- * alone, independent of the axis, rate, and trial, so both the trial worker and
- * the row formatter derive them the same way from make_model(). */
+/* The decoder model and measurement windows for one point - fixed by the code,
+ * axis, rate, and variation but not the trial, so both the trial worker and the
+ * row formatter derive them the same way from make_model(). */
 typedef struct {
   dv_stream_params params;
   int code_n;
@@ -422,31 +496,60 @@ typedef struct {
   double lock_sum, detect_sum;
 } trial_result;
 
-static point_model make_model(const dv_code *code) {
+static point_model make_model(const dv_code *code, axis channel_axis,
+                              double rate, variation var) {
   point_model m;
   m.code_n = dv_code_n(code);
   m.constraint_len = dv_code_k(code);
-
-  /* One fixed, channel-agnostic decoder model: every impairment pegged at a flat
-   * 1%, regardless of which axis is being swept or how high its rate runs. The
-   * decoder is never told what the channel is doing - that is the point. At low
-   * rates it sees roughly what it expects; as a rate climbs it meets something
-   * increasingly unexpected, which is exactly the stress the sweep is meant to
-   * measure. Matching the model to the channel would let the decoder cheat and
-   * make every code look better than it really is. Drift tracking is always on
-   * so the pegged insertion/deletion assumption is live on every axis, not just
-   * the indel ones. */
-  const double pegged = 0.01;
-  m.max_drift = 8;
   m.decision_depth = 8 * m.constraint_len;
-  m.params = (dv_stream_params){
-      .decision_depth = m.decision_depth,
-      .max_drift = m.max_drift,
-      .p_sub = pegged,
-      .p_ins = pegged,
-      .p_del = pegged,
-      .p_erase = pegged,
-  };
+
+  if (var != VAR_MATCHED) {
+    /* Channel-agnostic model: every impairment pegged at a flat 1%, regardless
+     * of which axis is swept or how high its rate runs, with drift tracking
+     * always on. The decoder is never told what the channel is doing, so at low
+     * rates it sees roughly what it expects and as a rate climbs it meets
+     * something increasingly unexpected - the stress this variation measures. */
+    const double pegged = 0.01;
+    m.max_drift = 8;
+    m.params = (dv_stream_params){
+        .decision_depth = m.decision_depth,
+        .max_drift = m.max_drift,
+        .p_sub = pegged,
+        .p_ins = pegged,
+        .p_del = pegged,
+        .p_erase = pegged,
+    };
+  } else {
+    /* Matched model: the decoder anticipates the channel, setting the active
+     * impairment's probability to the swept rate and tracking drift only when
+     * that impairment is an indel. The inactive probabilities sit at a small
+     * floor; the decoder needs every rate strictly inside (0, 1) and
+     * p_ins + p_del < 1, so the active rate is clamped just shy of those bounds
+     * at the high end. This variation shows the decoder's best case. */
+    const double min_prob = 1e-3;
+    const double max_prob = 1.0 - min_prob;
+    const double drift_max = 1.0 - 2.0 * min_prob;
+    const double channel_ins = channel_axis == AXIS_INSERT ? rate : 0.0;
+    const double channel_del = channel_axis == AXIS_DELETE ? rate : 0.0;
+    m.max_drift =
+        (channel_axis == AXIS_INSERT || channel_axis == AXIS_DELETE) ? 8 : 0;
+    m.params = (dv_stream_params){
+        .decision_depth = m.decision_depth,
+        .max_drift = m.max_drift,
+        .p_sub = (channel_axis == AXIS_FLIP)
+                     ? clamp_double(rate, min_prob, max_prob)
+                     : 0.005,
+        .p_ins = (m.max_drift > 0)
+                     ? clamp_double(channel_ins, min_prob, drift_max)
+                     : 0.0,
+        .p_del = (m.max_drift > 0)
+                     ? clamp_double(channel_del, min_prob, drift_max)
+                     : 0.0,
+        .p_erase = (channel_axis == AXIS_ERASE)
+                       ? clamp_double(rate, min_prob, max_prob)
+                       : 0.0,
+    };
+  }
   m.warmup = m.decision_depth;
 
   /* Sliding-window detection. dv_detect collapses a whole buffer into one
@@ -474,10 +577,11 @@ static point_model make_model(const dv_code *code) {
  * independent, so trials parallelize across cores (see main). */
 static trial_result run_one_trial(const dv_code *code, axis channel_axis,
                                   metric which_metric, double rate,
-                                  int info_bits, uint64_t seed) {
+                                  int info_bits, uint64_t seed,
+                                  variation var) {
   uint64_t rng_state = seed;
   uint64_t *rng = &rng_state;
-  const point_model m = make_model(code);
+  const point_model m = make_model(code, channel_axis, rate, var);
 
   /* Channel rates: only the active axis is nonzero. */
   const double channel_sub = channel_axis == AXIS_FLIP ? rate : 0.0;
@@ -618,9 +722,40 @@ int main(int argc, char **argv) {
   int info_bits = argc > 2 ? atoi(argv[2]) : 1000;
   uint64_t seed = argc > 3 ? strtoull(argv[3], NULL, 0) : 0xC0FFEEULL;
   if (trials < 1 || info_bits < 1) {
-    fprintf(stderr, "usage: %s [trials>=1] [info_bits>=1] [seed]\n", argv[0]);
+    fprintf(stderr,
+            "usage: %s [trials>=1] [info_bits>=1] [seed] "
+            "[variation=pegged|matched|detect]\n",
+            argv[0]);
     return 2;
   }
+
+  /* What to measure. The decoding variations (pegged, matched) measure edit and
+   * lock; detect measures blind detection alone. pegged/matched accept the
+   * untuned/tuned aliases. */
+  variation var = VAR_PEGGED;
+  if (argc > 4) {
+    if (strcmp(argv[4], "matched") == 0 || strcmp(argv[4], "tuned") == 0) {
+      var = VAR_MATCHED;
+    } else if (strcmp(argv[4], "pegged") == 0 ||
+               strcmp(argv[4], "untuned") == 0) {
+      var = VAR_PEGGED;
+    } else if (strcmp(argv[4], "detect") == 0) {
+      var = VAR_DETECT;
+    } else {
+      fprintf(stderr,
+              "dv_metrics: unknown variation '%s' (use pegged|matched|detect)\n",
+              argv[4]);
+      return 2;
+    }
+  }
+
+  /* Metrics for this variation: the decoding variations measure edit and lock;
+   * detect measures detection alone. */
+  const metric DECODE_METRICS[] = {METRIC_EDIT, METRIC_LOCK};
+  const metric DETECT_METRICS[] = {METRIC_DETECT};
+  const metric *run_metrics =
+      var == VAR_DETECT ? DETECT_METRICS : DECODE_METRICS;
+  const int n_run_metrics = var == VAR_DETECT ? 1 : 2;
 
   /* The trellis tables in a dv_code are read-only once built, so all threads
    * share the four codes; each decode allocates its own decoder state. */
@@ -638,10 +773,10 @@ int main(int argc, char **argv) {
    * list rather than decomposing a flat index. */
   const int n_axes = N_AXES;
   int n_points = 0;
-  for (int metric_idx = 0; metric_idx < N_METRICS; ++metric_idx) {
+  for (int mi = 0; mi < n_run_metrics; ++mi) {
     for (int axis_idx = 0; axis_idx < n_axes; ++axis_idx) {
       int count;
-      metric_axis_rates((metric)metric_idx, (axis)axis_idx, &count);
+      metric_axis_rates(var, run_metrics[mi], (axis)axis_idx, &count);
       n_points += N_CODES * count;
     }
   }
@@ -655,15 +790,15 @@ int main(int argc, char **argv) {
   work_item *items = xmalloc((size_t)n_points * sizeof(*items));
   int filled = 0;
   for (int code_idx = 0; code_idx < N_CODES; ++code_idx) {
-    for (int metric_idx = 0; metric_idx < N_METRICS; ++metric_idx) {
+    for (int mi = 0; mi < n_run_metrics; ++mi) {
       for (int axis_idx = 0; axis_idx < n_axes; ++axis_idx) {
         int count;
         const double *rates =
-            metric_axis_rates((metric)metric_idx, (axis)axis_idx, &count);
+            metric_axis_rates(var, run_metrics[mi], (axis)axis_idx, &count);
         for (int rate_idx = 0; rate_idx < count; ++rate_idx) {
           items[filled].code_idx = code_idx;
           items[filled].channel_axis = (axis)axis_idx;
-          items[filled].which_metric = (metric)metric_idx;
+          items[filled].which_metric = run_metrics[mi];
           items[filled].rate = rates[rate_idx];
           ++filled;
         }
@@ -671,12 +806,15 @@ int main(int argc, char **argv) {
     }
   }
 
+  const char *var_name = var == VAR_MATCHED  ? "matched"
+                         : var == VAR_DETECT ? "detect"
+                                             : "pegged";
 #ifdef _OPENMP
-  fprintf(stderr, "running %d points x %d trials on %d threads ...\n", n_points,
-          trials, omp_get_max_threads());
+  fprintf(stderr, "running %d points x %d trials (%s) on %d threads ...\n",
+          n_points, trials, var_name, omp_get_max_threads());
 #else
-  fprintf(stderr, "running %d points x %d trials (single-threaded) ...\n",
-          n_points, trials);
+  fprintf(stderr, "running %d points x %d trials (%s, single-threaded) ...\n",
+          n_points, trials, var_name);
 #endif
 
   printf(
@@ -710,7 +848,7 @@ int main(int argc, char **argv) {
       results[(size_t)point * trials + trial] =
           run_one_trial(codes[item.code_idx], item.channel_axis,
                         item.which_metric, item.rate, info_bits,
-                        derive_seed(seed, point * trials + trial));
+                        derive_seed(seed, point * trials + trial), var);
 
       int left;
 #ifdef _OPENMP
@@ -721,7 +859,8 @@ int main(int argc, char **argv) {
         left = remaining[point];
       }
       if (left == 0) {
-        const point_model m = make_model(codes[item.code_idx]);
+        const point_model m =
+            make_model(codes[item.code_idx], item.channel_axis, item.rate, var);
         trial_result agg = {0, 0, 0, 0, 0.0, 0.0};
         for (int t = 0; t < trials; ++t) {
           const trial_result *s = &results[(size_t)point * trials + t];
